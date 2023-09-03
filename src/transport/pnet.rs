@@ -5,13 +5,18 @@
 //!
 //! [1]: https://crates.io/crates/pnet
 
-use crate::transport::Ping;
+use crate::transport::{Ping, ReceivedPing};
+use pnet::packet::icmp::echo_reply::EchoReplyPacket as IcmpEchoReplyPacket;
+use pnet::packet::icmpv6::echo_reply::EchoReplyPacket as Icmpv6EchoReplyPacket;
 use pnet::packet::Packet;
 use pnet::packet::{icmp, icmpv6};
-use pnet::transport::TransportSender;
+use pnet::transport::{icmp_packet_iter, icmpv6_packet_iter, TransportReceiver, TransportSender};
 use pnet::util;
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex, RwLock};
+use std::thread;
+use std::time::Instant;
 
 pub(crate) fn send_pings<'a, I: Iterator<Item = &'a mut Ping>>(
     targets: I,
@@ -65,4 +70,95 @@ fn send_echov6(
     // Note: ICMPv6 checksum always calculated by the kernel, see RFC 3542
 
     tx.send_to(echo_packet, ping.get_addr())
+}
+
+pub(crate) fn start_listener(
+    rxv4: TransportReceiver,
+    rxv6: TransportReceiver,
+    thread_tx: Sender<ReceivedPing>,
+    timer: Arc<RwLock<Instant>>,
+) {
+    // start icmp listeners in the background and use internal channels for results
+    start_listener_v4(rxv4, thread_tx.clone(), timer.clone());
+    start_listener_v6(rxv6, thread_tx.clone(), timer.clone());
+}
+
+fn start_listener_v4(
+    mut receiver: TransportReceiver,
+    thread_tx: Sender<ReceivedPing>,
+    timer: Arc<RwLock<Instant>>,
+) {
+    thread::spawn(move || {
+        let mut iter = icmp_packet_iter(&mut receiver);
+        loop {
+            match iter.next() {
+                Ok((packet, addr)) => {
+                    if packet.get_icmp_type() != icmp::IcmpTypes::EchoReply {
+                        debug!(
+                            "ICMP type other than reply (0) received from {:?}: {:?}",
+                            addr,
+                            packet.get_icmp_type()
+                        );
+                        continue;
+                    }
+                    if let Some(echo_reply) = IcmpEchoReplyPacket::new(packet.packet()) {
+                        let start_time = timer.read().unwrap();
+                        let received = ReceivedPing {
+                            addr,
+                            identifier: echo_reply.get_identifier(),
+                            sequence_number: echo_reply.get_sequence_number(),
+                            rtt: start_time.elapsed(),
+                        };
+                        if thread_tx.send(received).is_err() {
+                            debug!("ICMP ReceivedPing channel closed, exiting listening loop");
+                            return;
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("An error occurred while reading: {}", e);
+                }
+            }
+        }
+    });
+}
+
+fn start_listener_v6(
+    mut receiver: TransportReceiver,
+    thread_tx: Sender<ReceivedPing>,
+    timer: Arc<RwLock<Instant>>,
+) {
+    thread::spawn(move || {
+        let mut iter = icmpv6_packet_iter(&mut receiver);
+        loop {
+            match iter.next() {
+                Ok((packet, addr)) => {
+                    if packet.get_icmpv6_type() != icmpv6::Icmpv6Types::EchoReply {
+                        debug!(
+                            "ICMPv6 type other than reply (129) received from {:?}: {:?}",
+                            addr,
+                            packet.get_icmpv6_type()
+                        );
+                        continue;
+                    }
+                    if let Some(echo_reply) = Icmpv6EchoReplyPacket::new(packet.packet()) {
+                        let start_time = timer.read().unwrap();
+                        let received = ReceivedPing {
+                            addr,
+                            identifier: echo_reply.get_identifier(),
+                            sequence_number: echo_reply.get_sequence_number(),
+                            rtt: start_time.elapsed(),
+                        };
+                        if thread_tx.send(received).is_err() {
+                            debug!("ICMPv6 ReceivedPing channel closed, exiting listening loop");
+                            return;
+                        };
+                    }
+                }
+                Err(e) => {
+                    error!("An error occurred while reading: {}", e);
+                }
+            }
+        }
+    });
 }
