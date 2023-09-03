@@ -67,17 +67,8 @@ pub struct Pinger {
     // sender end of libpnet icmp v4 transport channel
     tx: Arc<Mutex<TransportSender>>,
 
-    // receiver end of libpnet icmp v4 transport channel
-    rx: Arc<Mutex<TransportReceiver>>,
-
     // sender end of libpnet icmp v6 transport channel
     txv6: Arc<Mutex<TransportSender>>,
-
-    // receiver end of libpnet icmp v6 transport channel
-    rxv6: Arc<Mutex<TransportReceiver>>,
-
-    // sender for internal result passing beween threads
-    thread_tx: Sender<ReceivedPing>,
 
     // receiver for internal result passing beween threads
     thread_rx: Arc<Mutex<Receiver<ReceivedPing>>>,
@@ -112,16 +103,13 @@ impl Pinger {
             size: size.unwrap_or(16),
             results_sender: sender,
             tx: Arc::new(Mutex::new(tx)),
-            rx: Arc::new(Mutex::new(rx)),
             txv6: Arc::new(Mutex::new(txv6)),
-            rxv6: Arc::new(Mutex::new(rxv6)),
             thread_rx: Arc::new(Mutex::new(thread_rx)),
-            thread_tx,
             timer: Arc::new(RwLock::new(Instant::now())),
             stop: Arc::new(Mutex::new(false)),
         };
 
-        pinger.start_listener();
+        pinger.start_listener(rx, rxv6, thread_tx);
         Ok((pinger, receiver))
     }
 
@@ -284,16 +272,23 @@ impl Pinger {
         }
     }
 
-    fn start_listener(&self) {
+    fn start_listener(
+        &self,
+        rxv4: TransportReceiver,
+        rxv6: TransportReceiver,
+        thread_tx: Sender<ReceivedPing>,
+    ) {
         // start icmp listeners in the background and use internal channels for results
+        Self::start_listener_v4(rxv4, thread_tx.clone(), self.timer.clone());
+        Self::start_listener_v6(rxv6, thread_tx.clone(), self.timer.clone());
+    }
 
-        // setup ipv4 listener
-        let thread_tx = self.thread_tx.clone();
-        let rx = self.rx.clone();
-        let timer = self.timer.clone();
-
+    fn start_listener_v4(
+        mut receiver: TransportReceiver,
+        thread_tx: Sender<ReceivedPing>,
+        timer: Arc<RwLock<Instant>>,
+    ) {
         thread::spawn(move || {
-            let mut receiver = rx.lock().unwrap();
             let mut iter = icmp_packet_iter(&mut receiver);
             loop {
                 match iter.next() {
@@ -326,14 +321,14 @@ impl Pinger {
                 }
             }
         });
+    }
 
-        // setup ipv6 listener
-        let thread_txv6 = self.thread_tx.clone();
-        let rxv6 = self.rxv6.clone();
-        let timerv6 = self.timer.clone();
-
+    fn start_listener_v6(
+        mut receiver: TransportReceiver,
+        thread_tx: Sender<ReceivedPing>,
+        timer: Arc<RwLock<Instant>>,
+    ) {
         thread::spawn(move || {
-            let mut receiver = rxv6.lock().unwrap();
             let mut iter = icmpv6_packet_iter(&mut receiver);
             loop {
                 match iter.next() {
@@ -347,14 +342,14 @@ impl Pinger {
                             continue;
                         }
                         if let Some(echo_reply) = Icmpv6EchoReplyPacket::new(packet.packet()) {
-                            let start_time = timerv6.read().unwrap();
+                            let start_time = timer.read().unwrap();
                             let received = ReceivedPing {
                                 addr,
                                 identifier: echo_reply.get_identifier(),
                                 sequence_number: echo_reply.get_sequence_number(),
                                 rtt: start_time.elapsed(),
                             };
-                            if thread_txv6.send(received).is_err() {
+                            if thread_tx.send(received).is_err() {
                                 debug!(
                                     "ICMPv6 ReceivedPing channel closed, exiting listening loop"
                                 );
