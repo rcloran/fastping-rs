@@ -74,7 +74,7 @@ pub struct Pinger {
 
 impl Pinger {
     // initialize the pinger and start the icmp and icmpv6 listeners
-    pub fn new(_max_rtt: Option<u64>, _size: Option<usize>) -> NewPingerResult {
+    pub fn new(max_rtt: Option<Duration>, _size: Option<usize>) -> NewPingerResult {
         let targets = BTreeMap::new();
         let (sender, receiver) = channel();
 
@@ -93,7 +93,7 @@ impl Pinger {
         let (thread_tx, thread_rx) = channel();
 
         let mut pinger = Pinger {
-            max_rtt: Arc::new(Duration::from_millis(2000)),
+            max_rtt: Arc::new(max_rtt.unwrap_or(Duration::from_millis(2000))),
             targets: Arc::new(Mutex::new(targets)),
             size: _size.unwrap_or(16),
             results_sender: sender,
@@ -106,9 +106,6 @@ impl Pinger {
             timer: Arc::new(RwLock::new(Instant::now())),
             stop: Arc::new(Mutex::new(false)),
         };
-        if let Some(rtt_value) = _max_rtt {
-            pinger.max_rtt = Arc::new(Duration::from_millis(rtt_value));
-        }
         if let Some(size_value) = _size {
             pinger.size = size_value;
         }
@@ -194,7 +191,7 @@ impl Pinger {
                 tx,
                 txv6,
                 targets,
-                max_rtt,
+                &max_rtt,
             );
         } else {
             thread::spawn(move || {
@@ -207,7 +204,7 @@ impl Pinger {
                     tx,
                     txv6,
                     targets,
-                    max_rtt,
+                    &max_rtt,
                 );
             });
         }
@@ -309,7 +306,7 @@ mod tests {
         // test we can create a new pinger with optional arguments,
         // test it returns the new pinger and a client channel
         // test we can use the client channel
-        let (pinger, channel) = Pinger::new(Some(3000), Some(24))?;
+        let (pinger, channel) = Pinger::new(Some(Duration::from_millis(3000)), Some(24))?;
 
         assert_eq!(pinger.max_rtt, Arc::new(Duration::new(3, 0)));
         assert_eq!(pinger.size, 24);
