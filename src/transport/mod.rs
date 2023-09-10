@@ -1,3 +1,8 @@
+//! Lower level pinger
+//!
+//! This module provides functionality which provides a thin wrapper over the network layer. At
+//! this level we only deal with sending and receiving packets, and calculating RTT.
+
 use pnet::packet::Packet;
 use pnet::packet::{icmp, icmpv6};
 use pnet::transport::TransportSender;
@@ -8,6 +13,7 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// A representation of the information needed to create a ping (echo request)
 #[derive(Debug)]
 pub struct Ping {
     addr: IpAddr,
@@ -16,6 +22,7 @@ pub struct Ping {
     pub seen: bool,
 }
 
+/// A representation the information we have after receiving a ping reply (echo response)
 #[derive(Debug)]
 pub struct ReceivedPing {
     pub addr: IpAddr,
