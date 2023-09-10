@@ -176,31 +176,94 @@ impl Pinger {
         }
 
         if run_once {
-            send_pings(
-                size,
-                timer,
-                stop,
-                results_sender,
-                thread_rx,
-                tx,
-                txv6,
-                targets,
-                &max_rtt,
-            );
+            send_pings(targets.clone(), size, tx, txv6);
+            Self::await_replies(targets, timer, thread_rx, stop, &results_sender, &max_rtt);
         } else {
-            thread::spawn(move || {
-                send_pings(
-                    size,
-                    timer,
-                    stop,
-                    results_sender,
-                    thread_rx,
-                    tx,
-                    txv6,
-                    targets,
+            thread::spawn(move || loop {
+                send_pings(targets.clone(), size, tx.clone(), txv6.clone());
+                Self::await_replies(
+                    targets.clone(),
+                    timer.clone(),
+                    thread_rx.clone(),
+                    stop.clone(),
+                    &results_sender,
                     &max_rtt,
                 );
+                // check if we've received the stop signal
+                if *stop.lock().unwrap() {
+                    return;
+                }
             });
+        }
+    }
+
+    fn await_replies(
+        targets: Arc<Mutex<BTreeMap<IpAddr, Ping>>>,
+        timer: Arc<RwLock<Instant>>,
+        thread_rx: Arc<Mutex<Receiver<ReceivedPing>>>,
+        stop: Arc<Mutex<bool>>,
+        results_sender: &Sender<PingResult>,
+        max_rtt: &Duration,
+    ) {
+        let start_time = Instant::now();
+        {
+            // start the timer
+            let mut timer = timer.write().unwrap();
+            *timer = start_time;
+        }
+        loop {
+            // use recv_timeout so we don't cause a CPU to needlessly spin
+            match thread_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(max_rtt.saturating_sub(start_time.elapsed()))
+            {
+                Ok(ping_result) => {
+                    // match ping_result {
+                    let ReceivedPing {
+                        addr,
+                        identifier,
+                        sequence_number,
+                        rtt,
+                    } = ping_result;
+                    // Update the address to the ping response being received
+                    if let Some(ping) = targets.lock().unwrap().get_mut(&addr) {
+                        if ping.get_identifier() == identifier
+                            && ping.get_sequence_number() == sequence_number
+                        {
+                            ping.seen = true;
+                            // Send the ping result over the client channel
+                            if let Err(e) = results_sender.send(PingResult::Receive { addr, rtt }) {
+                                if !*stop.lock().unwrap() {
+                                    error!("Error sending ping result on channel: {}", e)
+                                }
+                            }
+                        } else {
+                            debug!("Received echo reply from target {}, but sequence_number (expected {} but got {}) and identifier (expected {} but got {}) don't match", addr, ping.get_sequence_number(), sequence_number, ping.get_identifier(), identifier);
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Check we haven't exceeded the max rtt
+                    if start_time.elapsed() > *max_rtt {
+                        break;
+                    }
+                }
+            }
+        }
+        // check for addresses which haven't replied
+        for (addr, ping) in targets.lock().unwrap().iter() {
+            if !ping.seen {
+                // Send the ping Idle over the client channel
+                match results_sender.send(PingResult::Idle { addr: *addr }) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        if !*stop.lock().unwrap() {
+                            error!("Error sending ping Idle result on channel: {}", e)
+                        }
+                    }
+                }
+            }
         }
     }
 

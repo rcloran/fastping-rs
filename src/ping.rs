@@ -1,4 +1,3 @@
-use crate::PingResult;
 use pnet::packet::Packet;
 use pnet::packet::{icmp, icmpv6};
 use pnet::transport::TransportSender;
@@ -6,9 +5,8 @@ use pnet::util;
 use rand::random;
 use std::collections::BTreeMap;
 use std::net::IpAddr;
-use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[derive(Debug)]
 pub struct Ping {
@@ -92,99 +90,20 @@ fn send_echov6(
     tx.send_to(echo_packet, ping.get_addr())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn send_pings(
+    targets: Arc<Mutex<BTreeMap<IpAddr, Ping>>>,
     size: usize,
-    timer: Arc<RwLock<Instant>>,
-    stop: Arc<Mutex<bool>>,
-    results_sender: Sender<PingResult>,
-    thread_rx: Arc<Mutex<Receiver<ReceivedPing>>>,
     tx: Arc<Mutex<TransportSender>>,
     txv6: Arc<Mutex<TransportSender>>,
-    targets: Arc<Mutex<BTreeMap<IpAddr, Ping>>>,
-    max_rtt: &Duration,
 ) {
-    loop {
-        for (addr, ping) in targets.lock().unwrap().iter_mut() {
-            if let Err(e) = match addr {
-                IpAddr::V4(..) => send_echo(&mut tx.lock().unwrap(), ping, size),
-                IpAddr::V6(..) => send_echov6(&mut txv6.lock().unwrap(), ping, size),
-            } {
-                error!("Failed to send ping to {:?}: {}", *addr, e);
-            };
-            ping.seen = false;
-        }
-
-        let start_time = Instant::now();
-        {
-            // start the timer
-            let mut timer = timer.write().unwrap();
-            *timer = start_time;
-        }
-        loop {
-            // use recv_timeout so we don't cause a CPU to needlessly spin
-            match thread_rx
-                .lock()
-                .unwrap()
-                .recv_timeout(max_rtt.saturating_sub(start_time.elapsed()))
-            {
-                Ok(ping_result) => {
-                    // match ping_result {
-                    let ReceivedPing {
-                        addr,
-                        identifier,
-                        sequence_number,
-                        rtt: _,
-                    } = ping_result;
-                    // Update the address to the ping response being received
-                    if let Some(ping) = targets.lock().unwrap().get_mut(&addr) {
-                        if ping.get_identifier() == identifier
-                            && ping.get_sequence_number() == sequence_number
-                        {
-                            ping.seen = true;
-                            // Send the ping result over the client channel
-                            match results_sender.send(PingResult::Receive {
-                                addr: ping_result.addr,
-                                rtt: ping_result.rtt,
-                            }) {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    if !*stop.lock().unwrap() {
-                                        error!("Error sending ping result on channel: {}", e)
-                                    }
-                                }
-                            }
-                        } else {
-                            debug!("Received echo reply from target {}, but sequence_number (expected {} but got {}) and identifier (expected {} but got {}) don't match", addr, ping.get_sequence_number(), sequence_number, ping.get_identifier(), identifier);
-                        }
-                    }
-                }
-                Err(_) => {
-                    // Check we haven't exceeded the max rtt
-                    if start_time.elapsed() >= *max_rtt {
-                        break;
-                    }
-                }
-            }
-        }
-        // check for addresses which haven't replied
-        for (addr, ping) in targets.lock().unwrap().iter() {
-            if !ping.seen {
-                // Send the ping Idle over the client channel
-                match results_sender.send(PingResult::Idle { addr: *addr }) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        if !*stop.lock().unwrap() {
-                            error!("Error sending ping Idle result on channel: {}", e)
-                        }
-                    }
-                }
-            }
-        }
-        // check if we've received the stop signal
-        if *stop.lock().unwrap() {
-            return;
-        }
+    for (addr, ping) in targets.lock().unwrap().iter_mut() {
+        if let Err(e) = match addr {
+            IpAddr::V4(..) => send_echo(&mut tx.lock().unwrap(), ping, size),
+            IpAddr::V6(..) => send_echov6(&mut txv6.lock().unwrap(), ping, size),
+        } {
+            error!("Failed to send ping to {:?}: {}", *addr, e);
+        };
+        ping.seen = false;
     }
 }
 
