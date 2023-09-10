@@ -17,7 +17,8 @@ pub mod error;
 mod transport;
 
 use crate::error::*;
-use crate::transport::{send_pings, Ping, ReceivedPing};
+use crate::transport::pnet::send_pings;
+use crate::transport::{Ping, ReceivedPing};
 use pnet::packet::icmp::echo_reply::EchoReplyPacket as IcmpEchoReplyPacket;
 use pnet::packet::icmpv6::echo_reply::EchoReplyPacket as Icmpv6EchoReplyPacket;
 use pnet::packet::ip::IpNextHeaderProtocols;
