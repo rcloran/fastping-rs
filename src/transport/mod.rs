@@ -7,7 +7,7 @@ use rand::random;
 use std::net::IpAddr;
 use std::time::Duration;
 
-pub(crate) mod pnet;
+pub mod pnet;
 
 /// A representation of the information needed to create a ping (echo request)
 #[derive(Debug)]
