@@ -14,20 +14,14 @@
 extern crate log;
 
 pub mod error;
-mod transport;
+pub mod transport;
 
 use crate::error::*;
-use crate::transport::pnet::{send_pings, start_listener};
 use crate::transport::{Ping, ReceivedPing};
-use pnet::packet::ip::IpNextHeaderProtocols;
-use pnet::transport::transport_channel;
-use pnet::transport::TransportChannelType::Layer4;
-use pnet::transport::TransportProtocol::{Ipv4, Ipv6};
-use pnet::transport::TransportSender;
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -42,9 +36,8 @@ pub enum PingResult {
 
 /// A long-lived pinger
 ///
-/// [`Pinger`]s create raw sockets for sending and receiving ICMP echo requests, which requires
-/// special privileges on most operating systems. A thread is created to read from each (IPv4 and
-/// IPv6) socket, and results are provided to the client on the channel in the `results` field.
+/// [`Pinger`]s create [`PingTransport`]s  to send and receive ICMP echo requests and replies.
+/// Results are provided to the client on the channel returned by [`Pinger::new`].
 pub struct Pinger {
     // Number of milliseconds of an idle timeout. Once it passed,
     // the library calls an idle callback function.  Default is 2000
@@ -56,20 +49,14 @@ pub struct Pinger {
     // Size in bytes of the payload to send.  Default is 16 bytes
     size: usize,
 
+    // receiver end of channel from the transport
+    transport_receiver: Arc<Mutex<Receiver<ReceivedPing>>>,
+
     // sender end of the channel for piping results to client
     results_sender: Sender<PingResult>,
 
-    // sender end of libpnet icmp v4 transport channel
-    tx: Arc<Mutex<TransportSender>>,
-
-    // sender end of libpnet icmp v6 transport channel
-    txv6: Arc<Mutex<TransportSender>>,
-
-    // receiver for internal result passing beween threads
-    thread_rx: Arc<Mutex<Receiver<ReceivedPing>>>,
-
-    // timer for tracking round trip times
-    timer: Arc<RwLock<Instant>>,
+    // transport implementation
+    transport: transport::pnet::PingTransport,
 
     // flag to stop pinging
     stop: Arc<Mutex<bool>>,
@@ -82,29 +69,21 @@ impl Pinger {
         size: Option<usize>,
     ) -> Result<(Self, Receiver<PingResult>), Error> {
         let targets = BTreeMap::new();
-        let (sender, receiver) = channel();
+        let (results_sender, receiver) = channel();
+        let (transport_sender, transport_receiver) = channel();
 
-        let protocol = Layer4(Ipv4(IpNextHeaderProtocols::Icmp));
-        let (tx, rx) = transport_channel(4096, protocol)?;
-
-        let protocolv6 = Layer4(Ipv6(IpNextHeaderProtocols::Icmpv6));
-        let (txv6, rxv6) = transport_channel(4096, protocolv6)?;
-
-        let (thread_tx, thread_rx) = channel();
+        let transport = transport::pnet::PingTransport::new(transport_sender)?;
 
         let pinger = Pinger {
             max_rtt: max_rtt.unwrap_or(Duration::from_millis(2000)),
             targets: Arc::new(Mutex::new(targets)),
             size: size.unwrap_or(16),
-            results_sender: sender,
-            tx: Arc::new(Mutex::new(tx)),
-            txv6: Arc::new(Mutex::new(txv6)),
-            thread_rx: Arc::new(Mutex::new(thread_rx)),
-            timer: Arc::new(RwLock::new(Instant::now())),
+            transport_receiver: Arc::new(Mutex::new(transport_receiver)),
+            results_sender,
+            transport,
             stop: Arc::new(Mutex::new(false)),
         };
 
-        start_listener(rx, rxv6, thread_tx, pinger.timer.clone());
         Ok((pinger, receiver))
     }
 
@@ -139,13 +118,10 @@ impl Pinger {
 
     // run pinger either once or continuously
     fn run_pings(&self, run_once: bool) {
-        let thread_rx = self.thread_rx.clone();
-        let tx = self.tx.clone();
-        let txv6 = self.txv6.clone();
+        let transport_rx = self.transport_receiver.clone();
         let results_sender = self.results_sender.clone();
         let stop = self.stop.clone();
         let targets = self.targets.clone();
-        let timer = self.timer.clone();
         let max_rtt = self.max_rtt;
         let size = self.size;
 
@@ -160,31 +136,37 @@ impl Pinger {
         }
 
         if run_once {
-            send_pings(
+            let timer = Instant::now();
+            self.transport.send_pings(
                 targets.lock().unwrap().values_mut().map(|(ping, seen)| {
                     *seen = false;
                     ping
                 }),
                 size,
-                tx,
-                txv6,
             );
-            Self::await_replies(targets, timer, thread_rx, stop, &results_sender, &max_rtt);
+            Self::await_replies(
+                targets,
+                timer,
+                transport_rx,
+                stop,
+                &results_sender,
+                &max_rtt,
+            );
         } else {
+            let transport = self.transport.clone();
             thread::spawn(move || loop {
-                send_pings(
+                let timer = Instant::now();
+                transport.send_pings(
                     targets.lock().unwrap().values_mut().map(|(ping, seen)| {
                         *seen = false;
                         ping
                     }),
                     size,
-                    tx.clone(),
-                    txv6.clone(),
                 );
                 Self::await_replies(
                     targets.clone(),
-                    timer.clone(),
-                    thread_rx.clone(),
+                    timer,
+                    transport_rx.clone(),
                     stop.clone(),
                     &results_sender,
                     &max_rtt,
@@ -199,24 +181,18 @@ impl Pinger {
 
     fn await_replies(
         targets: Arc<Mutex<BTreeMap<IpAddr, (Ping, bool)>>>,
-        timer: Arc<RwLock<Instant>>,
+        timer: Instant,
         thread_rx: Arc<Mutex<Receiver<ReceivedPing>>>,
         stop: Arc<Mutex<bool>>,
         results_sender: &Sender<PingResult>,
         max_rtt: &Duration,
     ) {
-        let start_time = Instant::now();
-        {
-            // start the timer
-            let mut timer = timer.write().unwrap();
-            *timer = start_time;
-        }
         loop {
             // use recv_timeout so we don't cause a CPU to needlessly spin
             match thread_rx
                 .lock()
                 .unwrap()
-                .recv_timeout(max_rtt.saturating_sub(start_time.elapsed()))
+                .recv_timeout(max_rtt.saturating_sub(timer.elapsed()))
             {
                 Ok(ping_result) => {
                     // match ping_result {
@@ -245,7 +221,7 @@ impl Pinger {
                 }
                 Err(_) => {
                     // Check we haven't exceeded the max rtt
-                    if start_time.elapsed() > *max_rtt {
+                    if timer.elapsed() > *max_rtt {
                         break;
                     }
                 }

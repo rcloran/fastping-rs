@@ -5,11 +5,16 @@
 //!
 //! [1]: https://crates.io/crates/pnet
 
+use crate::error::Error;
 use crate::transport::{Ping, ReceivedPing};
 use pnet::packet::icmp::echo_reply::EchoReplyPacket as IcmpEchoReplyPacket;
 use pnet::packet::icmpv6::echo_reply::EchoReplyPacket as Icmpv6EchoReplyPacket;
+use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::Packet;
 use pnet::packet::{icmp, icmpv6};
+use pnet::transport::transport_channel;
+use pnet::transport::TransportChannelType::Layer4;
+use pnet::transport::TransportProtocol::{Ipv4, Ipv6};
 use pnet::transport::{icmp_packet_iter, icmpv6_packet_iter, TransportReceiver, TransportSender};
 use pnet::util;
 use std::net::IpAddr;
@@ -18,19 +23,67 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Instant;
 
-pub(crate) fn send_pings<'a, I: Iterator<Item = &'a mut Ping>>(
-    targets: I,
-    size: usize,
+/// A pnet transport
+///
+/// This encapsulates the underlying sockets and provides functionality to send some ping (echo
+/// request) packets on them, and send any received replies (echo responses) on the `resp_sender`
+/// channel provided.
+///
+/// This transport works by creating raw sockets for sending ICMP echo requests and receiving
+/// replies. These raw sockets require special privileges to create. On most operating systems that
+/// means `root`, or being a member of the `Administrators` group. Linux alternatively allows
+/// threads with the `CAP_NET_RAW` capability to create raw sockets. You can set capabilities on
+/// your binary file so that they will be granted every time it is started with `setcap`. For
+/// example:
+///
+/// ```sh
+/// sudo setcap cap_net_raw=ep ./target/debug/examples/ping
+/// ```
+#[derive(Clone)]
+pub struct PingTransport {
+    // sender end of libpnet icmp v4 transport channel
     tx: Arc<Mutex<TransportSender>>,
+
+    // sender end of libpnet icmp v6 transport channel
     txv6: Arc<Mutex<TransportSender>>,
-) {
-    for ping in targets {
-        if let Err(e) = match ping.addr {
-            IpAddr::V4(..) => send_echo(&mut tx.lock().unwrap(), ping, size),
-            IpAddr::V6(..) => send_echov6(&mut txv6.lock().unwrap(), ping, size),
-        } {
-            error!("Failed to send ping to {:?}: {}", ping.addr, e);
+
+    // timer for tracking round trip times
+    timer: Arc<RwLock<Instant>>,
+}
+
+impl PingTransport {
+    /// Creates a new [`PingTransport`], and send any responses received on `resp_sender`
+    pub fn new(resp_sender: Sender<ReceivedPing>) -> Result<Self, Error> {
+        let protocolv4 = Layer4(Ipv4(IpNextHeaderProtocols::Icmp));
+        let (tx, rx) = transport_channel(4096, protocolv4)?;
+
+        let protocolv6 = Layer4(Ipv6(IpNextHeaderProtocols::Icmpv6));
+        let (txv6, rxv6) = transport_channel(4096, protocolv6)?;
+
+        let transport = Self {
+            tx: Arc::new(Mutex::new(tx)),
+            txv6: Arc::new(Mutex::new(txv6)),
+            timer: Arc::new(RwLock::new(Instant::now())),
         };
+
+        start_listener(rx, rxv6, resp_sender, transport.timer.clone());
+        Ok(transport)
+    }
+
+    /// Send one ping (echo request) to each of the `targets`
+    pub fn send_pings<'a, I: Iterator<Item = &'a mut Ping>>(&self, targets: I, size: usize) {
+        {
+            let mut timer = self.timer.write().unwrap();
+            *timer = Instant::now();
+        }
+        for ping in targets {
+            if let Err(e) = match ping.addr {
+                IpAddr::V4(..) => send_echo(&mut self.tx.lock().unwrap(), ping, size),
+                IpAddr::V6(..) => send_echov6(&mut self.txv6.lock().unwrap(), ping, size),
+            } {
+                error!("Failed to send ping to {:?}: {}", ping.addr, e);
+            };
+        }
     }
 }
 
@@ -72,20 +125,20 @@ fn send_echov6(
     tx.send_to(echo_packet, ping.get_addr())
 }
 
-pub(crate) fn start_listener(
+fn start_listener(
     rxv4: TransportReceiver,
     rxv6: TransportReceiver,
-    thread_tx: Sender<ReceivedPing>,
+    resp_sender: Sender<ReceivedPing>,
     timer: Arc<RwLock<Instant>>,
 ) {
     // start icmp listeners in the background and use internal channels for results
-    start_listener_v4(rxv4, thread_tx.clone(), timer.clone());
-    start_listener_v6(rxv6, thread_tx.clone(), timer.clone());
+    start_listener_v4(rxv4, resp_sender.clone(), timer.clone());
+    start_listener_v6(rxv6, resp_sender.clone(), timer.clone());
 }
 
 fn start_listener_v4(
     mut receiver: TransportReceiver,
-    thread_tx: Sender<ReceivedPing>,
+    resp_sender: Sender<ReceivedPing>,
     timer: Arc<RwLock<Instant>>,
 ) {
     thread::spawn(move || {
@@ -109,7 +162,7 @@ fn start_listener_v4(
                             sequence_number: echo_reply.get_sequence_number(),
                             rtt: start_time.elapsed(),
                         };
-                        if thread_tx.send(received).is_err() {
+                        if resp_sender.send(received).is_err() {
                             debug!("ICMP ReceivedPing channel closed, exiting listening loop");
                             return;
                         }
@@ -125,7 +178,7 @@ fn start_listener_v4(
 
 fn start_listener_v6(
     mut receiver: TransportReceiver,
-    thread_tx: Sender<ReceivedPing>,
+    resp_sender: Sender<ReceivedPing>,
     timer: Arc<RwLock<Instant>>,
 ) {
     thread::spawn(move || {
@@ -149,7 +202,7 @@ fn start_listener_v6(
                             sequence_number: echo_reply.get_sequence_number(),
                             rtt: start_time.elapsed(),
                         };
-                        if thread_tx.send(received).is_err() {
+                        if resp_sender.send(received).is_err() {
                             debug!("ICMPv6 ReceivedPing channel closed, exiting listening loop");
                             return;
                         };
