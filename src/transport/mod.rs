@@ -8,7 +8,6 @@ use pnet::packet::{icmp, icmpv6};
 use pnet::transport::TransportSender;
 use pnet::util;
 use rand::random;
-use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -97,18 +96,18 @@ fn send_echov6(
     tx.send_to(echo_packet, ping.get_addr())
 }
 
-pub fn send_pings(
-    targets: Arc<Mutex<BTreeMap<IpAddr, Ping>>>,
+pub fn send_pings<'a, I: Iterator<Item = &'a mut Ping>>(
+    targets: I,
     size: usize,
     tx: Arc<Mutex<TransportSender>>,
     txv6: Arc<Mutex<TransportSender>>,
 ) {
-    for (addr, ping) in targets.lock().unwrap().iter_mut() {
-        if let Err(e) = match addr {
+    for ping in targets {
+        if let Err(e) = match ping.addr {
             IpAddr::V4(..) => send_echo(&mut tx.lock().unwrap(), ping, size),
             IpAddr::V6(..) => send_echov6(&mut txv6.lock().unwrap(), ping, size),
         } {
-            error!("Failed to send ping to {:?}: {}", *addr, e);
+            error!("Failed to send ping to {:?}: {}", ping.addr, e);
         };
         ping.seen = false;
     }

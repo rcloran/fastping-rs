@@ -176,11 +176,16 @@ impl Pinger {
         }
 
         if run_once {
-            send_pings(targets.clone(), size, tx, txv6);
+            send_pings(targets.lock().unwrap().values_mut(), size, tx, txv6);
             Self::await_replies(targets, timer, thread_rx, stop, &results_sender, &max_rtt);
         } else {
             thread::spawn(move || loop {
-                send_pings(targets.clone(), size, tx.clone(), txv6.clone());
+                send_pings(
+                    targets.lock().unwrap().values_mut(),
+                    size,
+                    tx.clone(),
+                    txv6.clone(),
+                );
                 Self::await_replies(
                     targets.clone(),
                     timer.clone(),
