@@ -18,7 +18,6 @@ pub struct Ping {
     addr: IpAddr,
     identifier: u16,
     sequence_number: u16,
-    pub seen: bool,
 }
 
 /// A representation the information we have after receiving a ping reply (echo response)
@@ -36,7 +35,6 @@ impl Ping {
             addr,
             identifier: random::<u16>(),
             sequence_number: 0,
-            seen: false,
         }
     }
 
@@ -109,7 +107,6 @@ pub fn send_pings<'a, I: Iterator<Item = &'a mut Ping>>(
         } {
             error!("Failed to send ping to {:?}: {}", ping.addr, e);
         };
-        ping.seen = false;
     }
 }
 

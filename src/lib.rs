@@ -55,7 +55,7 @@ pub struct Pinger {
     max_rtt: Duration,
 
     // map of addresses to ping on each run
-    targets: Arc<Mutex<BTreeMap<IpAddr, Ping>>>,
+    targets: Arc<Mutex<BTreeMap<IpAddr, (Ping, bool)>>>,
 
     // Size in bytes of the payload to send.  Default is 16 bytes
     size: usize,
@@ -128,7 +128,7 @@ impl Pinger {
     pub fn add_ipaddr(&self, addr: IpAddr) {
         debug!("Address added {}", addr);
         let new_ping = Ping::new(addr);
-        self.targets.lock().unwrap().insert(addr, new_ping);
+        self.targets.lock().unwrap().insert(addr, (new_ping, false));
     }
 
     /// Remove a previously added target address
@@ -176,12 +176,23 @@ impl Pinger {
         }
 
         if run_once {
-            send_pings(targets.lock().unwrap().values_mut(), size, tx, txv6);
+            send_pings(
+                targets.lock().unwrap().values_mut().map(|(ping, seen)| {
+                    *seen = false;
+                    ping
+                }),
+                size,
+                tx,
+                txv6,
+            );
             Self::await_replies(targets, timer, thread_rx, stop, &results_sender, &max_rtt);
         } else {
             thread::spawn(move || loop {
                 send_pings(
-                    targets.lock().unwrap().values_mut(),
+                    targets.lock().unwrap().values_mut().map(|(ping, seen)| {
+                        *seen = false;
+                        ping
+                    }),
                     size,
                     tx.clone(),
                     txv6.clone(),
@@ -203,7 +214,7 @@ impl Pinger {
     }
 
     fn await_replies(
-        targets: Arc<Mutex<BTreeMap<IpAddr, Ping>>>,
+        targets: Arc<Mutex<BTreeMap<IpAddr, (Ping, bool)>>>,
         timer: Arc<RwLock<Instant>>,
         thread_rx: Arc<Mutex<Receiver<ReceivedPing>>>,
         stop: Arc<Mutex<bool>>,
@@ -232,11 +243,11 @@ impl Pinger {
                         rtt,
                     } = ping_result;
                     // Update the address to the ping response being received
-                    if let Some(ping) = targets.lock().unwrap().get_mut(&addr) {
+                    if let Some((ping, seen)) = targets.lock().unwrap().get_mut(&addr) {
                         if ping.get_identifier() == identifier
                             && ping.get_sequence_number() == sequence_number
                         {
-                            ping.seen = true;
+                            *seen = true;
                             // Send the ping result over the client channel
                             if let Err(e) = results_sender.send(PingResult::Receive { addr, rtt }) {
                                 if !*stop.lock().unwrap() {
@@ -257,8 +268,8 @@ impl Pinger {
             }
         }
         // check for addresses which haven't replied
-        for (addr, ping) in targets.lock().unwrap().iter() {
-            if !ping.seen {
+        for (addr, (_, seen)) in targets.lock().unwrap().iter() {
+            if !(*seen) {
                 // Send the ping Idle over the client channel
                 match results_sender.send(PingResult::Idle { addr: *addr }) {
                     Ok(_) => {}
