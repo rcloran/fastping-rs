@@ -56,6 +56,8 @@ pub struct Pinger<T: PingTransport = transport::pnet::PingTransport> {
     results_sender: Sender<PingResult>,
 
     // transport implementation
+    // Since fields are dropped in declaration order (RFC 1857), this should not be re-ordered to
+    // before the transport_receiver, see the pnet PingTransport implementation for details.
     transport: T,
 
     // flag to stop pinging

@@ -39,6 +39,11 @@ use std::time::Instant;
 /// ```sh
 /// sudo setcap cap_net_raw=ep ./target/debug/examples/ping
 /// ```
+///
+/// When the [`PingTransport`] is dropped an attempt will be made to stop the receiver by sending a
+/// spurious packet on the loopback address, but there is no guarantee that the thread will
+/// actually stop in any definite time. For this to be effective, the receiver end of the `Sender`
+/// passed in to the constructor should be closed (dropped) before this is dropped.
 #[derive(Clone)]
 pub struct PingTransport {
     // sender end of libpnet icmp v4 transport channel
@@ -84,6 +89,25 @@ impl crate::transport::PingTransport for PingTransport {
                 error!("Failed to send ping to {:?}: {}", ping.addr, e);
             };
         }
+    }
+}
+
+impl Drop for PingTransport {
+    fn drop(&mut self) {
+        let mut ping4 = Ping {
+            addr: [127, 0, 0, 1].into(),
+            identifier: 0,
+            sequence_number: 0,
+        };
+        let mut ping6 = Ping {
+            addr: "::1".parse().unwrap(),
+            identifier: 0,
+            sequence_number: 0,
+        };
+
+        // Send a packet to each socket to try to trigger thread exit.
+        send_echo(&mut self.tx.lock().unwrap(), &mut ping4, 16).unwrap_or_default();
+        send_echov6(&mut self.txv6.lock().unwrap(), &mut ping6, 16).unwrap_or_default();
     }
 }
 
