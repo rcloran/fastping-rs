@@ -3,11 +3,22 @@
 //! This module provides functionality which provides a thin wrapper over the network layer. At
 //! this level we only deal with sending and receiving packets, and calculating RTT.
 
+use crate::error::Error;
 use rand::random;
 use std::net::IpAddr;
+use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 pub mod pnet;
+
+/// The main functionality exposed by this module is encapsulated by a [`PingTransport`]. Different
+/// network layers will implement this trait.
+pub trait PingTransport: Clone + Send + Sized {
+    /// Creates a new [`PingTransport`], and send any responses received on the `ping_sender`
+    fn new(ping_sender: Sender<ReceivedPing>) -> Result<Self, Error>;
+    /// Send one ping (echo request) to each of the `targets`
+    fn send_pings<'a, I: Iterator<Item = &'a mut Ping>>(&self, targets: I, size: usize);
+}
 
 /// A representation of the information needed to create a ping (echo request)
 #[derive(Debug)]
