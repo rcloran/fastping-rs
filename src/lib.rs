@@ -17,7 +17,7 @@ pub mod error;
 pub mod transport;
 
 use crate::error::*;
-use crate::transport::{Ping, ReceivedPing};
+use crate::transport::{Ping, PingTransport, ReceivedPing};
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -38,7 +38,7 @@ pub enum PingResult {
 ///
 /// [`Pinger`]s create [`PingTransport`]s  to send and receive ICMP echo requests and replies.
 /// Results are provided to the client on the channel returned by [`Pinger::new`].
-pub struct Pinger {
+pub struct Pinger<T: PingTransport = transport::pnet::PingTransport> {
     // Number of milliseconds of an idle timeout. Once it passed,
     // the library calls an idle callback function.  Default is 2000
     max_rtt: Duration,
@@ -56,13 +56,13 @@ pub struct Pinger {
     results_sender: Sender<PingResult>,
 
     // transport implementation
-    transport: transport::pnet::PingTransport,
+    transport: T,
 
     // flag to stop pinging
     stop: Arc<Mutex<bool>>,
 }
 
-impl Pinger {
+impl<T: PingTransport + 'static> Pinger<T> {
     /// Create a [`Pinger`], create sockets, and start network listener threads
     pub fn new(
         max_rtt: Option<Duration>,
@@ -72,7 +72,7 @@ impl Pinger {
         let (results_sender, receiver) = channel();
         let (transport_sender, transport_receiver) = channel();
 
-        let transport = transport::pnet::PingTransport::new(transport_sender)?;
+        let transport = T::new(transport_sender)?;
 
         let pinger = Pinger {
             max_rtt: max_rtt.unwrap_or(Duration::from_millis(2000)),
@@ -253,7 +253,7 @@ mod tests {
         // test we can create a new pinger with optional arguments,
         // test it returns the new pinger and a client channel
         // test we can use the client channel
-        let (pinger, channel) = Pinger::new(Some(Duration::from_millis(3000)), Some(24))?;
+        let (pinger, channel) = <Pinger>::new(Some(Duration::from_millis(3000)), Some(24))?;
 
         assert_eq!(pinger.max_rtt, Duration::new(3, 0));
         assert_eq!(pinger.size, 24);
@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn test_add_remove_addrs() -> Result<(), Box<dyn std::error::Error>> {
-        let (pinger, _) = Pinger::new(None, None)?;
+        let (pinger, _) = <Pinger>::new(None, None)?;
         pinger.add_ipaddr([127, 0, 0, 1].into());
         assert_eq!(pinger.targets.lock().unwrap().len(), 1);
         assert!(pinger
@@ -305,7 +305,7 @@ mod tests {
     #[test]
     fn test_integration() -> Result<(), Box<dyn std::error::Error>> {
         // more comprehensive integration test
-        let (pinger, channel) = Pinger::new(None, None)?;
+        let (pinger, channel) = <Pinger>::new(None, None)?;
         let test_addrs = ["127.0.0.1", "7.7.7.7", "::1"];
 
         for target in test_addrs {

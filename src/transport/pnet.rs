@@ -51,9 +51,9 @@ pub struct PingTransport {
     timer: Arc<RwLock<Instant>>,
 }
 
-impl PingTransport {
+impl crate::transport::PingTransport for PingTransport {
     /// Creates a new [`PingTransport`], and send any responses received on `resp_sender`
-    pub fn new(resp_sender: Sender<ReceivedPing>) -> Result<Self, Error> {
+    fn new(resp_sender: Sender<ReceivedPing>) -> Result<Self, Error> {
         let protocolv4 = Layer4(Ipv4(IpNextHeaderProtocols::Icmp));
         let (tx, rx) = transport_channel(4096, protocolv4)?;
 
@@ -71,7 +71,7 @@ impl PingTransport {
     }
 
     /// Send one ping (echo request) to each of the `targets`
-    pub fn send_pings<'a, I: Iterator<Item = &'a mut Ping>>(&self, targets: I, size: usize) {
+    fn send_pings<'a, I: Iterator<Item = &'a mut Ping>>(&self, targets: I, size: usize) {
         {
             let mut timer = self.timer.write().unwrap();
             *timer = Instant::now();
