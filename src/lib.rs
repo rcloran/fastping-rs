@@ -52,7 +52,7 @@ pub enum PingResult {
 pub struct Pinger {
     // Number of milliseconds of an idle timeout. Once it passed,
     // the library calls an idle callback function.  Default is 2000
-    max_rtt: Arc<Duration>,
+    max_rtt: Duration,
 
     // map of addresses to ping on each run
     targets: Arc<Mutex<BTreeMap<IpAddr, Ping>>>,
@@ -106,7 +106,7 @@ impl Pinger {
         let (thread_tx, thread_rx) = channel();
 
         let pinger = Pinger {
-            max_rtt: Arc::new(max_rtt.unwrap_or(Duration::from_millis(2000))),
+            max_rtt: max_rtt.unwrap_or(Duration::from_millis(2000)),
             targets: Arc::new(Mutex::new(targets)),
             size: size.unwrap_or(16),
             results_sender: sender,
@@ -162,7 +162,7 @@ impl Pinger {
         let stop = self.stop.clone();
         let targets = self.targets.clone();
         let timer = self.timer.clone();
-        let max_rtt = self.max_rtt.clone();
+        let max_rtt = self.max_rtt;
         let size = self.size;
 
         {
@@ -302,7 +302,7 @@ mod tests {
         // test we can use the client channel
         let (pinger, channel) = Pinger::new(Some(Duration::from_millis(3000)), Some(24))?;
 
-        assert_eq!(pinger.max_rtt, Arc::new(Duration::new(3, 0)));
+        assert_eq!(pinger.max_rtt, Duration::new(3, 0));
         assert_eq!(pinger.size, 24);
 
         let localhost = [127, 0, 0, 1].into();
