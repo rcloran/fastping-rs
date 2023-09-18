@@ -221,42 +221,35 @@ impl Pinger {
         let thread_tx = self.thread_tx.clone();
         let rx = self.rx.clone();
         let timer = self.timer.clone();
-        let stop = self.stop.clone();
 
         thread::spawn(move || {
             let mut receiver = rx.lock().unwrap();
             let mut iter = icmp_packet_iter(&mut receiver);
             loop {
                 match iter.next() {
-                    Ok((packet, addr)) => match IcmpEchoReplyPacket::new(packet.packet()) {
-                        Some(echo_reply) => {
-                            if packet.get_icmp_type() == icmp::IcmpTypes::EchoReply {
-                                let start_time = timer.read().unwrap();
-                                match thread_tx.send(ReceivedPing {
-                                    addr,
-                                    identifier: echo_reply.get_identifier(),
-                                    sequence_number: echo_reply.get_sequence_number(),
-                                    rtt: Instant::now().duration_since(*start_time),
-                                }) {
-                                    Ok(_) => {}
-                                    Err(e) => {
-                                        if !*stop.lock().unwrap() {
-                                            error!("Error sending ping result on channel: {}", e)
-                                        } else {
-                                            return;
-                                        }
-                                    }
-                                }
-                            } else {
-                                debug!(
-                                    "ICMP type other than reply (0) received from {:?}: {:?}",
-                                    addr,
-                                    packet.get_icmp_type()
-                                );
+                    Ok((packet, addr)) => {
+                        if packet.get_icmp_type() != icmp::IcmpTypes::EchoReply {
+                            debug!(
+                                "ICMP type other than reply (0) received from {:?}: {:?}",
+                                addr,
+                                packet.get_icmp_type()
+                            );
+                            continue;
+                        }
+                        if let Some(echo_reply) = IcmpEchoReplyPacket::new(packet.packet()) {
+                            let start_time = timer.read().unwrap();
+                            let received = ReceivedPing {
+                                addr,
+                                identifier: echo_reply.get_identifier(),
+                                sequence_number: echo_reply.get_sequence_number(),
+                                rtt: start_time.elapsed(),
+                            };
+                            if thread_tx.send(received).is_err() {
+                                debug!("ICMP ReceivedPing channel closed, exiting listening loop");
+                                return;
                             }
                         }
-                        None => {}
-                    },
+                    }
                     Err(e) => {
                         error!("An error occurred while reading: {}", e);
                     }
@@ -268,42 +261,37 @@ impl Pinger {
         let thread_txv6 = self.thread_tx.clone();
         let rxv6 = self.rxv6.clone();
         let timerv6 = self.timer.clone();
-        let stopv6 = self.stop.clone();
 
         thread::spawn(move || {
             let mut receiver = rxv6.lock().unwrap();
             let mut iter = icmpv6_packet_iter(&mut receiver);
             loop {
                 match iter.next() {
-                    Ok((packet, addr)) => match Icmpv6EchoReplyPacket::new(packet.packet()) {
-                        Some(echo_reply) => {
-                            if packet.get_icmpv6_type() == icmpv6::Icmpv6Types::EchoReply {
-                                let start_time = timerv6.read().unwrap();
-                                match thread_txv6.send(ReceivedPing {
-                                    addr,
-                                    identifier: echo_reply.get_identifier(),
-                                    sequence_number: echo_reply.get_sequence_number(),
-                                    rtt: Instant::now().duration_since(*start_time),
-                                }) {
-                                    Ok(_) => {}
-                                    Err(e) => {
-                                        if !*stopv6.lock().unwrap() {
-                                            error!("Error sending ping result on channel: {}", e)
-                                        } else {
-                                            return;
-                                        }
-                                    }
-                                }
-                            } else {
-                                debug!(
-                                    "ICMPv6 type other than reply (129) received from {:?}: {:?}",
-                                    addr,
-                                    packet.get_icmpv6_type()
-                                );
-                            }
+                    Ok((packet, addr)) => {
+                        if packet.get_icmpv6_type() != icmpv6::Icmpv6Types::EchoReply {
+                            debug!(
+                                "ICMPv6 type other than reply (129) received from {:?}: {:?}",
+                                addr,
+                                packet.get_icmpv6_type()
+                            );
+                            continue;
                         }
-                        None => {}
-                    },
+                        if let Some(echo_reply) = Icmpv6EchoReplyPacket::new(packet.packet()) {
+                            let start_time = timerv6.read().unwrap();
+                            let received = ReceivedPing {
+                                addr,
+                                identifier: echo_reply.get_identifier(),
+                                sequence_number: echo_reply.get_sequence_number(),
+                                rtt: start_time.elapsed(),
+                            };
+                            if thread_txv6.send(received).is_err() {
+                                debug!(
+                                    "ICMPv6 ReceivedPing channel closed, exiting listening loop"
+                                );
+                                return;
+                            };
+                        }
+                    }
                     Err(e) => {
                         error!("An error occurred while reading: {}", e);
                     }
