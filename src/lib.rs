@@ -318,116 +318,86 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_newpinger() {
+    fn test_newpinger() -> Result<(), Box<dyn std::error::Error>> {
         // test we can create a new pinger with optional arguments,
         // test it returns the new pinger and a client channel
         // test we can use the client channel
-        match Pinger::new(Some(3000 as u64), Some(24)) {
-            Ok((test_pinger, test_channel)) => {
-                assert_eq!(test_pinger.max_rtt, Arc::new(Duration::new(3, 0)));
-                assert_eq!(test_pinger.size, 24);
+        let (pinger, channel) = Pinger::new(Some(3000), Some(24))?;
 
-                match test_pinger.results_sender.send(PingResult::Idle {
-                    addr: "127.0.0.1".parse::<IpAddr>().unwrap(),
-                }) {
-                    Ok(_) => match test_channel.recv() {
-                        Ok(result) => match result {
-                            PingResult::Idle { addr } => {
-                                assert_eq!(addr, "127.0.0.1".parse::<IpAddr>().unwrap());
-                            }
-                            _ => {}
-                        },
-                        Err(_) => assert!(false),
-                    },
-                    Err(_) => assert!(false),
-                }
-            }
-            Err(e) => {
-                println!("Test failed: {}", e);
-                assert!(false)
-            }
-        };
-    }
+        assert_eq!(pinger.max_rtt, Arc::new(Duration::new(3, 0)));
+        assert_eq!(pinger.size, 24);
 
-    #[test]
-    fn test_add_remove_addrs() {
-        match Pinger::new(None, None) {
-            Ok((test_pinger, _)) => {
-                test_pinger.add_ipaddr("127.0.0.1");
-                assert_eq!(test_pinger.targets.lock().unwrap().len(), 1);
-                assert!(test_pinger
-                    .targets
-                    .lock()
-                    .unwrap()
-                    .contains_key(&"127.0.0.1".parse::<IpAddr>().unwrap()));
+        let localhost = [127, 0, 0, 1].into();
+        let res = PingResult::Idle { addr: localhost };
 
-                test_pinger.remove_ipaddr("127.0.0.1");
-                assert_eq!(test_pinger.targets.lock().unwrap().len(), 0);
-                assert_eq!(
-                    test_pinger
-                        .targets
-                        .lock()
-                        .unwrap()
-                        .contains_key(&"127.0.0.1".parse::<IpAddr>().unwrap()),
-                    false
-                );
-            }
-            Err(e) => {
-                println!("Test failed: {}", e);
-                assert!(false)
-            }
+        pinger.results_sender.send(res)?;
+
+        match channel.recv()? {
+            PingResult::Idle { addr } => assert_eq!(addr, localhost),
+            _ => panic!("Unexpected result on channel"),
         }
+
+        Ok(())
     }
 
     #[test]
-    fn test_stop() {
-        match Pinger::new(None, None) {
-            Ok((test_pinger, _)) => {
-                assert_eq!(*test_pinger.stop.lock().unwrap(), false);
-                test_pinger.stop_pinger();
-                assert_eq!(*test_pinger.stop.lock().unwrap(), true);
-            }
-            Err(e) => {
-                println!("Test failed: {}", e);
-                assert!(false)
-            }
-        }
+    fn test_add_remove_addrs() -> Result<(), Box<dyn std::error::Error>> {
+        let (pinger, _) = Pinger::new(None, None)?;
+        pinger.add_ipaddr("127.0.0.1");
+        assert_eq!(pinger.targets.lock().unwrap().len(), 1);
+        assert!(pinger
+            .targets
+            .lock()
+            .unwrap()
+            .contains_key(&"127.0.0.1".parse::<IpAddr>().unwrap()));
+
+        pinger.remove_ipaddr("127.0.0.1");
+        assert_eq!(pinger.targets.lock().unwrap().len(), 0);
+        assert!(!pinger
+            .targets
+            .lock()
+            .unwrap()
+            .contains_key(&"127.0.0.1".parse::<IpAddr>().unwrap()),);
+
+        Ok(())
     }
 
     #[test]
-    fn test_integration() {
+    fn test_stop() -> Result<(), Box<dyn std::error::Error>> {
+        let (pinger, _) = <Pinger>::new(None, None)?;
+        assert!(!*pinger.stop.lock().unwrap());
+        pinger.stop_pinger();
+        assert!(*pinger.stop.lock().unwrap());
+        Ok(())
+    }
+
+    #[test]
+    fn test_integration() -> Result<(), Box<dyn std::error::Error>> {
         // more comprehensive integration test
-        match Pinger::new(None, None) {
-            Ok((test_pinger, test_channel)) => {
-                let test_addrs = vec!["127.0.0.1", "7.7.7.7", "::1"];
-                for target in test_addrs.iter() {
-                    test_pinger.add_ipaddr(target);
-                }
-                test_pinger.ping_once();
-                for _ in test_addrs.iter() {
-                    match test_channel.recv() {
-                        Ok(result) => match result {
-                            PingResult::Idle { addr } => {
-                                assert_eq!("7.7.7.7".parse::<IpAddr>().unwrap(), addr);
-                            }
-                            PingResult::Receive { addr, rtt: _ } => {
-                                if addr == "::1".parse::<IpAddr>().unwrap()
-                                    || addr == "127.0.0.1".parse::<IpAddr>().unwrap()
-                                {
-                                    assert!(true)
-                                } else {
-                                    assert!(false)
-                                }
-                            }
-                        },
-                        Err(_) => assert!(false),
-                    }
-                }
-            }
-            Err(e) => {
-                println!("Test failed: {}", e);
-                assert!(false)
-            }
+        let (pinger, channel) = Pinger::new(None, None)?;
+        let test_addrs = ["127.0.0.1", "7.7.7.7", "::1"];
+
+        for target in test_addrs {
+            pinger.add_ipaddr(target);
         }
+        pinger.ping_once();
+
+        for _ in test_addrs {
+            let result = channel.recv()?;
+
+            match result {
+                PingResult::Idle { addr } => {
+                    assert_eq!("7.7.7.7".parse::<IpAddr>()?, addr);
+                }
+                PingResult::Receive { addr, rtt: _ } => {
+                    assert!(
+                        addr == "::1".parse::<IpAddr>()?
+                            || addr == "127.0.0.1".parse::<IpAddr>()?
+                    )
+                }
+            };
+        }
+
+        Ok(())
     }
 }
