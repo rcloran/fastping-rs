@@ -58,7 +58,7 @@ pub struct Pinger<T: PingTransport = transport::pnet::PingTransport> {
     // transport implementation
     // Since fields are dropped in declaration order (RFC 1857), this should not be re-ordered to
     // before the transport_receiver, see the pnet PingTransport implementation for details.
-    transport: T,
+    transport: Arc<Mutex<T>>,
 
     // flag to stop pinging
     stop: Arc<Mutex<bool>>,
@@ -82,7 +82,7 @@ impl<T: PingTransport + 'static> Pinger<T> {
             payload: vec![],
             transport_receiver: Arc::new(Mutex::new(transport_receiver)),
             results_sender,
-            transport,
+            transport: Arc::new(Mutex::new(transport)),
             stop: Arc::new(Mutex::new(false)),
         };
 
@@ -145,7 +145,7 @@ impl<T: PingTransport + 'static> Pinger<T> {
 
         if run_once {
             let timer = Instant::now();
-            self.transport.send_pings(
+            self.transport.lock().unwrap().send_pings(
                 targets.lock().unwrap().values_mut().map(|(ping, seen)| {
                     *seen = false;
                     ping
@@ -164,7 +164,7 @@ impl<T: PingTransport + 'static> Pinger<T> {
             let transport = self.transport.clone();
             thread::spawn(move || loop {
                 let timer = Instant::now();
-                transport.send_pings(
+                transport.lock().unwrap().send_pings(
                     targets.lock().unwrap().values_mut().map(|(ping, seen)| {
                         *seen = false;
                         ping

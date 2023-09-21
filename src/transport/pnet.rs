@@ -19,7 +19,7 @@ use pnet::transport::{icmp_packet_iter, icmpv6_packet_iter, TransportReceiver, T
 use pnet::util;
 use std::net::IpAddr;
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Instant;
 
@@ -44,13 +44,12 @@ use std::time::Instant;
 /// spurious packet on the loopback address, but there is no guarantee that the thread will
 /// actually stop in any definite time. For this to be effective, the receiver end of the `Sender`
 /// passed in to the constructor should be closed (dropped) before this is dropped.
-#[derive(Clone)]
 pub struct PingTransport {
     // sender end of libpnet icmp v4 transport channel
-    tx: Arc<Mutex<TransportSender>>,
+    tx: TransportSender,
 
     // sender end of libpnet icmp v6 transport channel
-    txv6: Arc<Mutex<TransportSender>>,
+    txv6: TransportSender,
 
     // timer for tracking round trip times
     timer: Arc<RwLock<Instant>>,
@@ -66,8 +65,8 @@ impl crate::transport::PingTransport for PingTransport {
         let (txv6, rxv6) = transport_channel(4096, protocolv6)?;
 
         let transport = Self {
-            tx: Arc::new(Mutex::new(tx)),
-            txv6: Arc::new(Mutex::new(txv6)),
+            tx,
+            txv6,
             timer: Arc::new(RwLock::new(Instant::now())),
         };
 
@@ -76,15 +75,15 @@ impl crate::transport::PingTransport for PingTransport {
     }
 
     /// Send one ping (echo request) to each of the `targets`, with a payload of `payload`
-    fn send_pings<'a, I: Iterator<Item = &'a mut Ping>>(&self, targets: I, payload: &[u8]) {
+    fn send_pings<'a, I: Iterator<Item = &'a mut Ping>>(&mut self, targets: I, payload: &[u8]) {
         {
             let mut timer = self.timer.write().unwrap();
             *timer = Instant::now();
         }
         for ping in targets {
             if let Err(e) = match ping.addr {
-                IpAddr::V4(..) => send_echo(&mut self.tx.lock().unwrap(), ping, payload),
-                IpAddr::V6(..) => send_echov6(&mut self.txv6.lock().unwrap(), ping, payload),
+                IpAddr::V4(..) => send_echo(&mut self.tx, ping, payload),
+                IpAddr::V6(..) => send_echov6(&mut self.txv6, ping, payload),
             } {
                 error!("Failed to send ping to {:?}: {}", ping.addr, e);
             };
@@ -106,8 +105,8 @@ impl Drop for PingTransport {
         };
 
         // Send a packet to each socket to try to trigger thread exit.
-        send_echo(&mut self.tx.lock().unwrap(), &mut ping4, &[]).unwrap_or_default();
-        send_echov6(&mut self.txv6.lock().unwrap(), &mut ping6, &[]).unwrap_or_default();
+        send_echo(&mut self.tx, &mut ping4, &[]).unwrap_or_default();
+        send_echov6(&mut self.txv6, &mut ping6, &[]).unwrap_or_default();
     }
 }
 
