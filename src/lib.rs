@@ -20,6 +20,7 @@ use crate::error::*;
 use crate::transport::{Ping, PingTransport, ReceivedPing};
 use std::collections::BTreeMap;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -50,7 +51,7 @@ pub struct Pinger<T: PingTransport = transport::pnet::PingTransport> {
     payload: Vec<u8>,
 
     // receiver end of channel from the transport
-    transport_receiver: Arc<Mutex<Receiver<ReceivedPing>>>,
+    transport_receiver: Receiver<ReceivedPing>,
 
     // sender end of the channel for piping results to client
     results_sender: Sender<PingResult>,
@@ -58,19 +59,14 @@ pub struct Pinger<T: PingTransport = transport::pnet::PingTransport> {
     // transport implementation
     // Since fields are dropped in declaration order (RFC 1857), this should not be re-ordered to
     // before the transport_receiver, see the pnet PingTransport implementation for details.
-    transport: Arc<Mutex<T>>,
-
-    // flag to stop pinging
-    stop: Arc<Mutex<bool>>,
+    transport: T,
 }
 
 impl<T: PingTransport + 'static> Pinger<T> {
     /// Create a [`Pinger`], and the associated [`PingTransport`].
     ///
     /// `max_rtt` specifies the maximum round-trip-time allowed before a host times out
-    /// `size` specifies the packet payload size (ie, after headers)
     pub fn new(max_rtt: Option<Duration>) -> Result<(Self, Receiver<PingResult>), Error> {
-        let targets = BTreeMap::new();
         let (results_sender, receiver) = channel();
         let (transport_sender, transport_receiver) = channel();
 
@@ -78,12 +74,11 @@ impl<T: PingTransport + 'static> Pinger<T> {
 
         let pinger = Pinger {
             max_rtt: max_rtt.unwrap_or(Duration::from_millis(2000)),
-            targets: Arc::new(Mutex::new(targets)),
+            targets: Arc::new(Mutex::new(BTreeMap::new())),
             payload: vec![],
-            transport_receiver: Arc::new(Mutex::new(transport_receiver)),
+            transport_receiver,
             results_sender,
-            transport: Arc::new(Mutex::new(transport)),
-            stop: Arc::new(Mutex::new(false)),
+            transport,
         };
 
         Ok((pinger, receiver))
@@ -97,27 +92,18 @@ impl<T: PingTransport + 'static> Pinger<T> {
 
     /// Add a new target for pinging
     pub fn add_ipaddr(&self, addr: IpAddr) {
-        debug!("Address added {}", addr);
-        let new_ping = Ping::new(addr);
-        self.targets.lock().unwrap().insert(addr, (new_ping, false));
+        add_ipaddr(&self.targets, addr)
     }
 
     /// Remove a previously added target address
     pub fn remove_ipaddr(&self, addr: IpAddr) {
-        debug!("Address removed {}", addr);
-        self.targets.lock().unwrap().remove(&addr);
-    }
-
-    /// Stop running the continous pinger
-    pub fn stop_pinger(&self) {
-        let mut stop = self.stop.lock().unwrap();
-        *stop = true;
+        remove_ipaddr(&self.targets, addr)
     }
 
     /// Ping each target address once and stop
-    pub fn ping_once(&self) {
+    pub fn ping_once(&mut self) {
         let timer = Instant::now();
-        self.transport.lock().unwrap().send_pings(
+        self.transport.send_pings(
             self.targets
                 .lock()
                 .unwrap()
@@ -132,26 +118,26 @@ impl<T: PingTransport + 'static> Pinger<T> {
     }
 
     /// Run the pinger continuously
-    pub fn run(&self) {
-        // Can't move self to another thread, so we need to make a copy. For some reason, trying to
-        // derive Clone on Pinger requires T to implement Clone, even though the transport field is
-        // behind an Arc. Once-off clone...
-        let new = Self {
-            max_rtt: self.max_rtt,
-            targets: self.targets.clone(),
-            payload: self.payload.clone(),
-            transport_receiver: self.transport_receiver.clone(),
-            results_sender: self.results_sender.clone(),
-            transport: self.transport.clone(),
-            stop: self.stop.clone(),
-        };
-        thread::spawn(move || loop {
-            new.ping_once();
+    ///
+    /// This consumes the [`Pinger`] object and returns a new [`RunningPinger`]. The original
+    /// [`Pinger`] may be obtained from [`RunningPinger::stop`].
+    pub fn run(mut self) -> RunningPinger<T> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_inner = stop.clone();
+        let targets = self.targets.clone();
+        let join_handle = thread::spawn(move || loop {
+            self.ping_once();
             // check if we've received the stop signal
-            if *new.stop.lock().unwrap() {
-                return;
+            if stop_inner.load(Ordering::Relaxed) {
+                return self;
             }
         });
+
+        RunningPinger {
+            stop,
+            join_handle,
+            targets,
+        }
     }
 
     fn await_replies(&self, timer: Instant) {
@@ -159,8 +145,6 @@ impl<T: PingTransport + 'static> Pinger<T> {
             // use recv_timeout so we don't cause a CPU to needlessly spin
             match self
                 .transport_receiver
-                .lock()
-                .unwrap()
                 .recv_timeout(self.max_rtt.saturating_sub(timer.elapsed()))
             {
                 Ok(ping_result) => {
@@ -181,12 +165,19 @@ impl<T: PingTransport + 'static> Pinger<T> {
                             if let Err(e) =
                                 self.results_sender.send(PingResult::Receive { addr, rtt })
                             {
-                                if !*self.stop.lock().unwrap() {
-                                    error!("Error sending ping result on channel: {}", e)
-                                }
+                                trace!("Error sending ping result on channel: {}", e);
+                                // Nothing more (useful) we can do, channel is closed
+                                return;
                             }
                         } else {
-                            debug!("Received echo reply from target {}, but sequence_number (expected {} but got {}) and identifier (expected {} but got {}) don't match", addr, ping.get_sequence_number(), sequence_number, ping.get_identifier(), identifier);
+                            debug!(
+                                "Received echo reply from target {}, but sequence_number (expected {} but got {}) and identifier (expected {} but got {}) don't match",
+                                addr,
+                                ping.get_sequence_number(),
+                                sequence_number,
+                                ping.get_identifier(),
+                                identifier
+                            );
                         }
                     }
                 }
@@ -202,17 +193,64 @@ impl<T: PingTransport + 'static> Pinger<T> {
         for (addr, (_, seen)) in self.targets.lock().unwrap().iter() {
             if !(*seen) {
                 // Send the ping Idle over the client channel
-                match self.results_sender.send(PingResult::Idle { addr: *addr }) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        if !*self.stop.lock().unwrap() {
-                            error!("Error sending ping Idle result on channel: {}", e)
-                        }
-                    }
+                if let Err(e) = self.results_sender.send(PingResult::Idle { addr: *addr }) {
+                    trace!("Error sending ping Idle result on channel: {}", e);
+                    // Nothing more (useful) we can do, channel is closed
+                    return;
                 }
             }
         }
     }
+}
+
+/// A handle to a running [`Pinger`]
+///
+/// This `struct` is created by [`Pinger::run`].
+pub struct RunningPinger<T: PingTransport> {
+    stop: Arc<AtomicBool>,
+    join_handle: std::thread::JoinHandle<Pinger<T>>,
+    targets: Arc<Mutex<BTreeMap<IpAddr, (Ping, bool)>>>,
+}
+
+impl<T: PingTransport> RunningPinger<T> {
+    /// Signal the owned thread to stop, and then join on it.
+    ///
+    /// The original [`Pinger`] is returned if the continuous ping thread started by
+    /// [`Pinger::run`] did not panic.
+    pub fn stop(self) -> Option<Pinger<T>> {
+        self.stop.store(true, Ordering::Relaxed);
+        self.join_handle.join().ok()
+    }
+
+    /// Add a new target for pinging
+    ///
+    /// **An important note on concurrency**: The [`Pinger`] locks the list of targets while
+    /// sending, but only obtains short-lived locks while receiving. That means that:
+    ///
+    ///  - It may take some time to complete this function if there are already a large number of
+    ///    hosts, or if sending takes a long time for some other reason.
+    ///  - A spurious [`PingResult::Idle`] may be sent for newly added hosts
+    pub fn add_ipaddr(&self, addr: IpAddr) {
+        add_ipaddr(&self.targets, addr)
+    }
+
+    /// Remove a previously added target address
+    ///
+    /// **Please see the note on concurrency in [`RunningPinger::add_ipaddr`]**
+    pub fn remove_ipaddr(&self, addr: IpAddr) {
+        remove_ipaddr(&self.targets, addr)
+    }
+}
+
+fn add_ipaddr(targets: &Arc<Mutex<BTreeMap<IpAddr, (Ping, bool)>>>, addr: IpAddr) {
+    debug!("Address added {}", addr);
+    let new_ping = Ping::new(addr);
+    targets.lock().unwrap().insert(addr, (new_ping, false));
+}
+
+fn remove_ipaddr(targets: &Arc<Mutex<BTreeMap<IpAddr, (Ping, bool)>>>, addr: IpAddr) {
+    debug!("Address removed {}", addr);
+    targets.lock().unwrap().remove(&addr);
 }
 
 #[cfg(test)]
@@ -281,18 +319,25 @@ mod tests {
     }
 
     #[test]
-    fn test_stop() -> Result<(), BoxedError> {
-        let (pinger, _) = <Pinger>::new(None)?;
-        assert!(!*pinger.stop.lock().unwrap());
-        pinger.stop_pinger();
-        assert!(*pinger.stop.lock().unwrap());
+    fn test_stop() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut pinger, _) = <Pinger>::new(Some(Duration::from_millis(1)))?;
+        pinger.payload(b"Secret message");
+        let targets_len = pinger.targets.lock().unwrap().len();
+        // Copy attributes of the original Pinger
+        let max_rtt = pinger.max_rtt;
+        let stop_handle = pinger.run();
+        let pinger = stop_handle.stop().unwrap();
+        // Try to verify we have the same Pinger back. Other attributes can't be cloned.
+        assert_eq!(max_rtt, pinger.max_rtt);
+        assert_eq!(targets_len, pinger.targets.lock().unwrap().len());
+        assert_eq!(b"Secret message".to_vec(), pinger.payload);
         Ok(())
     }
 
     #[test]
     fn test_integration() -> Result<(), BoxedError> {
         // more comprehensive integration test
-        let (pinger, channel) = <Pinger>::new(None)?;
+        let (mut pinger, channel) = <Pinger>::new(None)?;
         let test_addrs = ["127.0.0.1", "7.7.7.7", "::1"];
 
         for target in test_addrs {
