@@ -35,20 +35,20 @@ impl Ping {
     }
 
     pub fn get_addr(&self) -> IpAddr {
-        return self.addr;
+        self.addr
     }
 
     pub fn get_identifier(&self) -> u16 {
-        return self.identifier;
+        self.identifier
     }
 
     pub fn get_sequence_number(&self) -> u16 {
-        return self.sequence_number;
+        self.sequence_number
     }
 
     pub fn increment_sequence_number(&mut self) -> u16 {
         self.sequence_number += 1;
-        return self.sequence_number;
+        self.sequence_number
     }
 }
 
