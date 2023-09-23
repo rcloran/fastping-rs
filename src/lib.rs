@@ -1,8 +1,7 @@
-extern crate pnet;
-extern crate pnet_macros_support;
+#![warn(rust_2018_idioms)]
+
 #[macro_use]
 extern crate log;
-extern crate rand;
 
 mod ping;
 
