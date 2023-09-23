@@ -10,6 +10,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+#[derive(Debug)]
 pub struct Ping {
     addr: IpAddr,
     identifier: u16,
@@ -17,6 +18,7 @@ pub struct Ping {
     pub seen: bool,
 }
 
+#[derive(Debug)]
 pub struct ReceivedPing {
     pub addr: IpAddr,
     pub identifier: u16,
@@ -100,7 +102,7 @@ pub fn send_pings(
     tx: Arc<Mutex<TransportSender>>,
     txv6: Arc<Mutex<TransportSender>>,
     targets: Arc<Mutex<BTreeMap<IpAddr, Ping>>>,
-    max_rtt: Arc<Duration>,
+    max_rtt: &Duration,
 ) {
     loop {
         for (addr, ping) in targets.lock().unwrap().iter_mut() {
