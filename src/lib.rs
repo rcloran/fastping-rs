@@ -1,8 +1,7 @@
-extern crate pnet;
-extern crate pnet_macros_support;
+#![warn(rust_2018_idioms)]
+
 #[macro_use]
 extern crate log;
-extern crate rand;
 
 mod ping;
 
@@ -221,42 +220,35 @@ impl Pinger {
         let thread_tx = self.thread_tx.clone();
         let rx = self.rx.clone();
         let timer = self.timer.clone();
-        let stop = self.stop.clone();
 
         thread::spawn(move || {
             let mut receiver = rx.lock().unwrap();
             let mut iter = icmp_packet_iter(&mut receiver);
             loop {
                 match iter.next() {
-                    Ok((packet, addr)) => match IcmpEchoReplyPacket::new(packet.packet()) {
-                        Some(echo_reply) => {
-                            if packet.get_icmp_type() == icmp::IcmpTypes::EchoReply {
-                                let start_time = timer.read().unwrap();
-                                match thread_tx.send(ReceivedPing {
-                                    addr,
-                                    identifier: echo_reply.get_identifier(),
-                                    sequence_number: echo_reply.get_sequence_number(),
-                                    rtt: Instant::now().duration_since(*start_time),
-                                }) {
-                                    Ok(_) => {}
-                                    Err(e) => {
-                                        if !*stop.lock().unwrap() {
-                                            error!("Error sending ping result on channel: {}", e)
-                                        } else {
-                                            return;
-                                        }
-                                    }
-                                }
-                            } else {
-                                debug!(
-                                    "ICMP type other than reply (0) received from {:?}: {:?}",
-                                    addr,
-                                    packet.get_icmp_type()
-                                );
+                    Ok((packet, addr)) => {
+                        if packet.get_icmp_type() != icmp::IcmpTypes::EchoReply {
+                            debug!(
+                                "ICMP type other than reply (0) received from {:?}: {:?}",
+                                addr,
+                                packet.get_icmp_type()
+                            );
+                            continue;
+                        }
+                        if let Some(echo_reply) = IcmpEchoReplyPacket::new(packet.packet()) {
+                            let start_time = timer.read().unwrap();
+                            let received = ReceivedPing {
+                                addr,
+                                identifier: echo_reply.get_identifier(),
+                                sequence_number: echo_reply.get_sequence_number(),
+                                rtt: start_time.elapsed(),
+                            };
+                            if thread_tx.send(received).is_err() {
+                                debug!("ICMP ReceivedPing channel closed, exiting listening loop");
+                                return;
                             }
                         }
-                        None => {}
-                    },
+                    }
                     Err(e) => {
                         error!("An error occurred while reading: {}", e);
                     }
@@ -268,42 +260,37 @@ impl Pinger {
         let thread_txv6 = self.thread_tx.clone();
         let rxv6 = self.rxv6.clone();
         let timerv6 = self.timer.clone();
-        let stopv6 = self.stop.clone();
 
         thread::spawn(move || {
             let mut receiver = rxv6.lock().unwrap();
             let mut iter = icmpv6_packet_iter(&mut receiver);
             loop {
                 match iter.next() {
-                    Ok((packet, addr)) => match Icmpv6EchoReplyPacket::new(packet.packet()) {
-                        Some(echo_reply) => {
-                            if packet.get_icmpv6_type() == icmpv6::Icmpv6Types::EchoReply {
-                                let start_time = timerv6.read().unwrap();
-                                match thread_txv6.send(ReceivedPing {
-                                    addr,
-                                    identifier: echo_reply.get_identifier(),
-                                    sequence_number: echo_reply.get_sequence_number(),
-                                    rtt: Instant::now().duration_since(*start_time),
-                                }) {
-                                    Ok(_) => {}
-                                    Err(e) => {
-                                        if !*stopv6.lock().unwrap() {
-                                            error!("Error sending ping result on channel: {}", e)
-                                        } else {
-                                            return;
-                                        }
-                                    }
-                                }
-                            } else {
-                                debug!(
-                                    "ICMPv6 type other than reply (129) received from {:?}: {:?}",
-                                    addr,
-                                    packet.get_icmpv6_type()
-                                );
-                            }
+                    Ok((packet, addr)) => {
+                        if packet.get_icmpv6_type() != icmpv6::Icmpv6Types::EchoReply {
+                            debug!(
+                                "ICMPv6 type other than reply (129) received from {:?}: {:?}",
+                                addr,
+                                packet.get_icmpv6_type()
+                            );
+                            continue;
                         }
-                        None => {}
-                    },
+                        if let Some(echo_reply) = Icmpv6EchoReplyPacket::new(packet.packet()) {
+                            let start_time = timerv6.read().unwrap();
+                            let received = ReceivedPing {
+                                addr,
+                                identifier: echo_reply.get_identifier(),
+                                sequence_number: echo_reply.get_sequence_number(),
+                                rtt: start_time.elapsed(),
+                            };
+                            if thread_txv6.send(received).is_err() {
+                                debug!(
+                                    "ICMPv6 ReceivedPing channel closed, exiting listening loop"
+                                );
+                                return;
+                            };
+                        }
+                    }
                     Err(e) => {
                         error!("An error occurred while reading: {}", e);
                     }
@@ -318,119 +305,86 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_newpinger() {
+    fn test_newpinger() -> Result<(), Box<dyn std::error::Error>> {
         // test we can create a new pinger with optional arguments,
         // test it returns the new pinger and a client channel
         // test we can use the client channel
-        match Pinger::new(Some(3000 as u64), Some(24)) {
-            Ok((test_pinger, test_channel)) => {
-                assert_eq!(test_pinger.max_rtt, Arc::new(Duration::new(3, 0)));
-                assert_eq!(test_pinger.size, 24);
+        let (pinger, channel) = Pinger::new(Some(3000), Some(24))?;
 
-                match test_pinger.results_sender.send(PingResult::Idle {
-                    addr: "127.0.0.1".parse::<IpAddr>().unwrap(),
-                }) {
-                    Ok(_) => match test_channel.recv() {
-                        Ok(result) => match result {
-                            PingResult::Idle { addr } => {
-                                assert_eq!(addr, "127.0.0.1".parse::<IpAddr>().unwrap());
-                            }
-                            _ => {}
-                        },
-                        Err(_) => assert!(false),
-                    },
-                    Err(_) => assert!(false),
-                }
-            }
-            Err(e) => {
-                println!("Test failed: {}", e);
-                assert!(false)
-            }
-        };
-    }
+        assert_eq!(pinger.max_rtt, Arc::new(Duration::new(3, 0)));
+        assert_eq!(pinger.size, 24);
 
-    #[test]
-    fn test_add_remove_addrs() {
-        match Pinger::new(None, None) {
-            Ok((test_pinger, _)) => {
-                test_pinger.add_ipaddr("127.0.0.1");
-                assert_eq!(test_pinger.targets.lock().unwrap().len(), 1);
-                assert!(test_pinger
-                    .targets
-                    .lock()
-                    .unwrap()
-                    .contains_key(&"127.0.0.1".parse::<IpAddr>().unwrap()));
+        let localhost = [127, 0, 0, 1].into();
+        let res = PingResult::Idle { addr: localhost };
 
-                test_pinger.remove_ipaddr("127.0.0.1");
-                assert_eq!(test_pinger.targets.lock().unwrap().len(), 0);
-                assert_eq!(
-                    test_pinger
-                        .targets
-                        .lock()
-                        .unwrap()
-                        .contains_key(&"127.0.0.1".parse::<IpAddr>().unwrap()),
-                    false
-                );
-            }
-            Err(e) => {
-                println!("Test failed: {}", e);
-                assert!(false)
-            }
+        pinger.results_sender.send(res)?;
+
+        match channel.recv()? {
+            PingResult::Idle { addr } => assert_eq!(addr, localhost),
+            _ => panic!("Unexpected result on channel"),
         }
+
+        Ok(())
     }
 
     #[test]
-    fn test_stop() {
-        match Pinger::new(None, None) {
-            Ok((test_pinger, _)) => {
-                assert_eq!(*test_pinger.stop.lock().unwrap(), false);
-                test_pinger.stop_pinger();
-                assert_eq!(*test_pinger.stop.lock().unwrap(), true);
-            }
-            Err(e) => {
-                println!("Test failed: {}", e);
-                assert!(false)
-            }
-        }
+    fn test_add_remove_addrs() -> Result<(), Box<dyn std::error::Error>> {
+        let (pinger, _) = Pinger::new(None, None)?;
+        pinger.add_ipaddr("127.0.0.1");
+        assert_eq!(pinger.targets.lock().unwrap().len(), 1);
+        assert!(pinger
+            .targets
+            .lock()
+            .unwrap()
+            .contains_key(&"127.0.0.1".parse::<IpAddr>().unwrap()));
+
+        pinger.remove_ipaddr("127.0.0.1");
+        assert_eq!(pinger.targets.lock().unwrap().len(), 0);
+        assert!(!pinger
+            .targets
+            .lock()
+            .unwrap()
+            .contains_key(&"127.0.0.1".parse::<IpAddr>().unwrap()),);
+
+        Ok(())
     }
 
     #[test]
-    fn test_integration() {
+    fn test_stop() -> Result<(), Box<dyn std::error::Error>> {
+        let (pinger, _) = <Pinger>::new(None, None)?;
+        assert!(!*pinger.stop.lock().unwrap());
+        pinger.stop_pinger();
+        assert!(*pinger.stop.lock().unwrap());
+        Ok(())
+    }
+
+    #[test]
+    fn test_integration() -> Result<(), Box<dyn std::error::Error>> {
         // more comprehensive integration test
-        match Pinger::new(None, None) {
-            Ok((test_pinger, test_channel)) => {
-                let test_addrs = vec!["127.0.0.1", "7.7.7.7", "::1"];
-                for target in test_addrs.iter() {
-                    test_pinger.add_ipaddr(target);
-                }
-                test_pinger.ping_once();
-                for _ in test_addrs.iter() {
-                    match test_channel.recv() {
-                        Ok(result) => match result {
-                            PingResult::Idle { addr } => {
-                                assert_eq!("7.7.7.7".parse::<IpAddr>().unwrap(), addr);
-                            }
-                            PingResult::Receive { addr, rtt: _ } => {
-                                if addr == "::1".parse::<IpAddr>().unwrap()
-                                    || addr == "127.0.0.1".parse::<IpAddr>().unwrap()
-                                {
-                                    assert!(true)
-                                } else {
-                                    assert!(false)
-                                }
-                            }
-                            _ => {
-                                assert!(false)
-                            }
-                        },
-                        Err(_) => assert!(false),
-                    }
-                }
-            }
-            Err(e) => {
-                println!("Test failed: {}", e);
-                assert!(false)
-            }
+        let (pinger, channel) = Pinger::new(None, None)?;
+        let test_addrs = ["127.0.0.1", "7.7.7.7", "::1"];
+
+        for target in test_addrs {
+            pinger.add_ipaddr(target);
         }
+        pinger.ping_once();
+
+        for _ in test_addrs {
+            let result = channel.recv()?;
+
+            match result {
+                PingResult::Idle { addr } => {
+                    assert_eq!("7.7.7.7".parse::<IpAddr>()?, addr);
+                }
+                PingResult::Receive { addr, rtt: _ } => {
+                    assert!(
+                        addr == "::1".parse::<IpAddr>()?
+                            || addr == "127.0.0.1".parse::<IpAddr>()?
+                    )
+                }
+            };
+        }
+
+        Ok(())
     }
 }

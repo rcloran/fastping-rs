@@ -1,3 +1,4 @@
+use crate::PingResult;
 use pnet::packet::Packet;
 use pnet::packet::{icmp, icmpv6};
 use pnet::transport::TransportSender;
@@ -8,7 +9,6 @@ use std::net::IpAddr;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
-use PingResult;
 
 pub struct Ping {
     addr: IpAddr,
@@ -35,20 +35,20 @@ impl Ping {
     }
 
     pub fn get_addr(&self) -> IpAddr {
-        return self.addr;
+        self.addr
     }
 
     pub fn get_identifier(&self) -> u16 {
-        return self.identifier;
+        self.identifier
     }
 
     pub fn get_sequence_number(&self) -> u16 {
-        return self.sequence_number;
+        self.sequence_number
     }
 
     pub fn increment_sequence_number(&mut self) -> u16 {
         self.sequence_number += 1;
-        return self.sequence_number;
+        self.sequence_number
     }
 }
 
@@ -90,6 +90,7 @@ fn send_echov6(
     tx.send_to(echo_packet, ping.get_addr())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn send_pings(
     size: usize,
     timer: Arc<RwLock<Instant>>,
@@ -103,16 +104,12 @@ pub fn send_pings(
 ) {
     loop {
         for (addr, ping) in targets.lock().unwrap().iter_mut() {
-            match if addr.is_ipv4() {
-                send_echo(&mut tx.lock().unwrap(), ping, size)
-            } else if addr.is_ipv6() {
-                send_echov6(&mut txv6.lock().unwrap(), ping, size)
-            } else {
-                Ok(0)
+            if let Err(e) = match addr {
+                IpAddr::V4(..) => send_echo(&mut tx.lock().unwrap(), ping, size),
+                IpAddr::V6(..) => send_echov6(&mut txv6.lock().unwrap(), ping, size),
             } {
-                Err(e) => error!("Failed to send ping to {:?}: {}", *addr, e),
-                _ => {}
-            }
+                error!("Failed to send ping to {:?}: {}", *addr, e);
+            };
             ping.seen = false;
         }
         let start_time = Instant::now();
@@ -169,7 +166,7 @@ pub fn send_pings(
         }
         // check for addresses which haven't replied
         for (addr, ping) in targets.lock().unwrap().iter() {
-            if ping.seen == false {
+            if !ping.seen {
                 // Send the ping Idle over the client channel
                 match results_sender.send(PingResult::Idle { addr: *addr }) {
                     Ok(_) => {}
