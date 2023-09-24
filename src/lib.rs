@@ -116,91 +116,52 @@ impl<T: PingTransport + 'static> Pinger<T> {
 
     /// Ping each target address once and stop
     pub fn ping_once(&self) {
-        self.run_pings(true)
-    }
-
-    /// Run the pinger continuously
-    pub fn run_pinger(&self) {
-        self.run_pings(false)
-    }
-
-    // run pinger either once or continuously
-    fn run_pings(&self, run_once: bool) {
-        let transport_rx = self.transport_receiver.clone();
-        let results_sender = self.results_sender.clone();
-        let stop = self.stop.clone();
-        let targets = self.targets.clone();
-        let max_rtt = self.max_rtt;
-        let payload: Vec<u8> = self.payload.clone();
-
-        {
-            let mut stop = self.stop.lock().unwrap();
-            if run_once {
-                debug!("Running pinger for one round");
-                *stop = true;
-            } else {
-                *stop = false;
-            }
-        }
-
-        if run_once {
-            let timer = Instant::now();
-            self.transport.lock().unwrap().send_pings(
-                targets.lock().unwrap().values_mut().map(|(ping, seen)| {
+        let timer = Instant::now();
+        self.transport.lock().unwrap().send_pings(
+            self.targets
+                .lock()
+                .unwrap()
+                .values_mut()
+                .map(|(ping, seen)| {
                     *seen = false;
                     ping
                 }),
-                &payload,
-            );
-            Self::await_replies(
-                targets,
-                timer,
-                transport_rx,
-                stop,
-                &results_sender,
-                &max_rtt,
-            );
-        } else {
-            let transport = self.transport.clone();
-            thread::spawn(move || loop {
-                let timer = Instant::now();
-                transport.lock().unwrap().send_pings(
-                    targets.lock().unwrap().values_mut().map(|(ping, seen)| {
-                        *seen = false;
-                        ping
-                    }),
-                    &payload,
-                );
-                Self::await_replies(
-                    targets.clone(),
-                    timer,
-                    transport_rx.clone(),
-                    stop.clone(),
-                    &results_sender,
-                    &max_rtt,
-                );
-                // check if we've received the stop signal
-                if *stop.lock().unwrap() {
-                    return;
-                }
-            });
-        }
+            &self.payload,
+        );
+        self.await_replies(timer);
     }
 
-    fn await_replies(
-        targets: Arc<Mutex<BTreeMap<IpAddr, (Ping, bool)>>>,
-        timer: Instant,
-        thread_rx: Arc<Mutex<Receiver<ReceivedPing>>>,
-        stop: Arc<Mutex<bool>>,
-        results_sender: &Sender<PingResult>,
-        max_rtt: &Duration,
-    ) {
+    /// Run the pinger continuously
+    pub fn run(&self) {
+        // Can't move self to another thread, so we need to make a copy. For some reason, trying to
+        // derive Clone on Pinger requires T to implement Clone, even though the transport field is
+        // behind an Arc. Once-off clone...
+        let new = Self {
+            max_rtt: self.max_rtt,
+            targets: self.targets.clone(),
+            payload: self.payload.clone(),
+            transport_receiver: self.transport_receiver.clone(),
+            results_sender: self.results_sender.clone(),
+            transport: self.transport.clone(),
+            stop: self.stop.clone(),
+        };
+        thread::spawn(move || loop {
+            new.ping_once();
+            // check if we've received the stop signal
+            if *new.stop.lock().unwrap() {
+                return;
+            }
+        });
+    }
+
+    fn await_replies(&self, timer: Instant) {
         loop {
             // use recv_timeout so we don't cause a CPU to needlessly spin
-            match thread_rx
+            match self
+                .transport_receiver
                 .lock()
                 .unwrap()
-                .recv_timeout(max_rtt.saturating_sub(timer.elapsed()))
+                .recv_timeout(self.max_rtt.saturating_sub(timer.elapsed()))
             {
                 Ok(ping_result) => {
                     // match ping_result {
@@ -211,14 +172,16 @@ impl<T: PingTransport + 'static> Pinger<T> {
                         rtt,
                     } = ping_result;
                     // Update the address to the ping response being received
-                    if let Some((ping, seen)) = targets.lock().unwrap().get_mut(&addr) {
+                    if let Some((ping, seen)) = self.targets.lock().unwrap().get_mut(&addr) {
                         if ping.get_identifier() == identifier
                             && ping.get_sequence_number() == sequence_number
                         {
                             *seen = true;
                             // Send the ping result over the client channel
-                            if let Err(e) = results_sender.send(PingResult::Receive { addr, rtt }) {
-                                if !*stop.lock().unwrap() {
+                            if let Err(e) =
+                                self.results_sender.send(PingResult::Receive { addr, rtt })
+                            {
+                                if !*self.stop.lock().unwrap() {
                                     error!("Error sending ping result on channel: {}", e)
                                 }
                             }
@@ -229,20 +192,20 @@ impl<T: PingTransport + 'static> Pinger<T> {
                 }
                 Err(_) => {
                     // Check we haven't exceeded the max rtt
-                    if timer.elapsed() > *max_rtt {
+                    if timer.elapsed() > self.max_rtt {
                         break;
                     }
                 }
             }
         }
         // check for addresses which haven't replied
-        for (addr, (_, seen)) in targets.lock().unwrap().iter() {
+        for (addr, (_, seen)) in self.targets.lock().unwrap().iter() {
             if !(*seen) {
                 // Send the ping Idle over the client channel
-                match results_sender.send(PingResult::Idle { addr: *addr }) {
+                match self.results_sender.send(PingResult::Idle { addr: *addr }) {
                     Ok(_) => {}
                     Err(e) => {
-                        if !*stop.lock().unwrap() {
+                        if !*self.stop.lock().unwrap() {
                             error!("Error sending ping Idle result on channel: {}", e)
                         }
                     }
