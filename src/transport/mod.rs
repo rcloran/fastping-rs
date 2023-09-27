@@ -13,11 +13,11 @@ pub mod pnet;
 
 /// The main functionality exposed by this module is encapsulated by a [`PingTransport`]. Different
 /// network layers will implement this trait.
-pub trait PingTransport: Clone + Send + Sized {
+pub trait PingTransport: Send + Sized {
     /// Creates a new [`PingTransport`], and send any responses received on the `ping_sender`
     fn new(ping_sender: Sender<ReceivedPing>) -> Result<Self, Error>;
     /// Send one ping (echo request) to each of the `targets`
-    fn send_pings<'a, I: Iterator<Item = &'a mut Ping>>(&self, targets: I, payload: &[u8]);
+    fn send_pings<'a, I: Iterator<Item = &'a mut Ping>>(&mut self, targets: I, payload: &[u8]);
 }
 
 /// A representation of the information needed to create a ping (echo request)

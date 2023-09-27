@@ -19,7 +19,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     pinger.add_ipaddr("1.1.1.1".parse()?);
     pinger.add_ipaddr("7.7.7.7".parse()?);
     pinger.add_ipaddr("2001:4860:4860::8888".parse()?);
-    pinger.run_pinger();
+    pinger.run();
 
     loop {
         match results.recv() {
