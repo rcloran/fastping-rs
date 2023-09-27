@@ -46,8 +46,8 @@ pub struct Pinger<T: PingTransport = transport::pnet::PingTransport> {
     // map of addresses to ping on each run
     targets: Arc<Mutex<BTreeMap<IpAddr, (Ping, bool)>>>,
 
-    // Size in bytes of the payload to send.  Default is 16 bytes
-    size: usize,
+    // Payload data to send, default is empty
+    payload: Vec<u8>,
 
     // receiver end of channel from the transport
     transport_receiver: Arc<Mutex<Receiver<ReceivedPing>>>,
@@ -65,11 +65,11 @@ pub struct Pinger<T: PingTransport = transport::pnet::PingTransport> {
 }
 
 impl<T: PingTransport + 'static> Pinger<T> {
-    /// Create a [`Pinger`], create sockets, and start network listener threads
-    pub fn new(
-        max_rtt: Option<Duration>,
-        size: Option<usize>,
-    ) -> Result<(Self, Receiver<PingResult>), Error> {
+    /// Create a [`Pinger`], and the associated [`PingTransport`].
+    ///
+    /// `max_rtt` specifies the maximum round-trip-time allowed before a host times out
+    /// `size` specifies the packet payload size (ie, after headers)
+    pub fn new(max_rtt: Option<Duration>) -> Result<(Self, Receiver<PingResult>), Error> {
         let targets = BTreeMap::new();
         let (results_sender, receiver) = channel();
         let (transport_sender, transport_receiver) = channel();
@@ -79,7 +79,7 @@ impl<T: PingTransport + 'static> Pinger<T> {
         let pinger = Pinger {
             max_rtt: max_rtt.unwrap_or(Duration::from_millis(2000)),
             targets: Arc::new(Mutex::new(targets)),
-            size: size.unwrap_or(16),
+            payload: vec![],
             transport_receiver: Arc::new(Mutex::new(transport_receiver)),
             results_sender,
             transport,
@@ -87,6 +87,12 @@ impl<T: PingTransport + 'static> Pinger<T> {
         };
 
         Ok((pinger, receiver))
+    }
+
+    /// Set the payload (the contents of the ICMP Echo Request packet after headers)
+    pub fn payload(&mut self, payload: &[u8]) -> &mut Self {
+        self.payload = payload.to_vec();
+        self
     }
 
     /// Add a new target for pinging
@@ -125,7 +131,7 @@ impl<T: PingTransport + 'static> Pinger<T> {
         let stop = self.stop.clone();
         let targets = self.targets.clone();
         let max_rtt = self.max_rtt;
-        let size = self.size;
+        let payload: Vec<u8> = self.payload.clone();
 
         {
             let mut stop = self.stop.lock().unwrap();
@@ -144,7 +150,7 @@ impl<T: PingTransport + 'static> Pinger<T> {
                     *seen = false;
                     ping
                 }),
-                size,
+                &payload,
             );
             Self::await_replies(
                 targets,
@@ -163,7 +169,7 @@ impl<T: PingTransport + 'static> Pinger<T> {
                         *seen = false;
                         ping
                     }),
-                    size,
+                    &payload,
                 );
                 Self::await_replies(
                     targets.clone(),
@@ -255,10 +261,9 @@ mod tests {
         // test we can create a new pinger with optional arguments,
         // test it returns the new pinger and a client channel
         // test we can use the client channel
-        let (pinger, channel) = <Pinger>::new(Some(Duration::from_millis(3000)), Some(24))?;
+        let (pinger, channel) = <Pinger>::new(Some(Duration::from_millis(3000)))?;
 
         assert_eq!(pinger.max_rtt, Duration::new(3, 0));
-        assert_eq!(pinger.size, 24);
 
         let localhost = [127, 0, 0, 1].into();
         let res = PingResult::Idle { addr: localhost };
@@ -275,7 +280,7 @@ mod tests {
 
     #[test]
     fn test_add_remove_addrs() -> Result<(), Box<dyn std::error::Error>> {
-        let (pinger, _) = <Pinger>::new(None, None)?;
+        let (pinger, _) = <Pinger>::new(None)?;
         pinger.add_ipaddr([127, 0, 0, 1].into());
         assert_eq!(pinger.targets.lock().unwrap().len(), 1);
         assert!(pinger
@@ -297,7 +302,7 @@ mod tests {
 
     #[test]
     fn test_stop() -> Result<(), Box<dyn std::error::Error>> {
-        let (pinger, _) = <Pinger>::new(None, None)?;
+        let (pinger, _) = <Pinger>::new(None)?;
         assert!(!*pinger.stop.lock().unwrap());
         pinger.stop_pinger();
         assert!(*pinger.stop.lock().unwrap());
@@ -307,7 +312,7 @@ mod tests {
     #[test]
     fn test_integration() -> Result<(), Box<dyn std::error::Error>> {
         // more comprehensive integration test
-        let (pinger, channel) = <Pinger>::new(None, None)?;
+        let (pinger, channel) = <Pinger>::new(None)?;
         let test_addrs = ["127.0.0.1", "7.7.7.7", "::1"];
 
         for target in test_addrs {

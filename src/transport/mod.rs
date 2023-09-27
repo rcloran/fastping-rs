@@ -17,7 +17,7 @@ pub trait PingTransport: Clone + Send + Sized {
     /// Creates a new [`PingTransport`], and send any responses received on the `ping_sender`
     fn new(ping_sender: Sender<ReceivedPing>) -> Result<Self, Error>;
     /// Send one ping (echo request) to each of the `targets`
-    fn send_pings<'a, I: Iterator<Item = &'a mut Ping>>(&self, targets: I, size: usize);
+    fn send_pings<'a, I: Iterator<Item = &'a mut Ping>>(&self, targets: I, payload: &[u8]);
 }
 
 /// A representation of the information needed to create a ping (echo request)

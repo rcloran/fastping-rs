@@ -75,16 +75,16 @@ impl crate::transport::PingTransport for PingTransport {
         Ok(transport)
     }
 
-    /// Send one ping (echo request) to each of the `targets`
-    fn send_pings<'a, I: Iterator<Item = &'a mut Ping>>(&self, targets: I, size: usize) {
+    /// Send one ping (echo request) to each of the `targets`, with a payload of `payload`
+    fn send_pings<'a, I: Iterator<Item = &'a mut Ping>>(&self, targets: I, payload: &[u8]) {
         {
             let mut timer = self.timer.write().unwrap();
             *timer = Instant::now();
         }
         for ping in targets {
             if let Err(e) = match ping.addr {
-                IpAddr::V4(..) => send_echo(&mut self.tx.lock().unwrap(), ping, size),
-                IpAddr::V6(..) => send_echov6(&mut self.txv6.lock().unwrap(), ping, size),
+                IpAddr::V4(..) => send_echo(&mut self.tx.lock().unwrap(), ping, payload),
+                IpAddr::V6(..) => send_echov6(&mut self.txv6.lock().unwrap(), ping, payload),
             } {
                 error!("Failed to send ping to {:?}: {}", ping.addr, e);
             };
@@ -106,23 +106,28 @@ impl Drop for PingTransport {
         };
 
         // Send a packet to each socket to try to trigger thread exit.
-        send_echo(&mut self.tx.lock().unwrap(), &mut ping4, 16).unwrap_or_default();
-        send_echov6(&mut self.txv6.lock().unwrap(), &mut ping6, 16).unwrap_or_default();
+        send_echo(&mut self.tx.lock().unwrap(), &mut ping4, &[]).unwrap_or_default();
+        send_echov6(&mut self.txv6.lock().unwrap(), &mut ping6, &[]).unwrap_or_default();
     }
 }
 
 fn send_echo(
     tx: &mut TransportSender,
     ping: &mut Ping,
-    size: usize,
+    payload: &[u8],
 ) -> Result<usize, std::io::Error> {
     // Allocate enough space for a new packet
-    let mut vec: Vec<u8> = vec![0; size];
+    let mut vec: Vec<u8> = vec![
+        0;
+        icmp::echo_request::MutableEchoRequestPacket::minimum_packet_size()
+            + payload.len()
+    ];
 
     let mut echo_packet = icmp::echo_request::MutableEchoRequestPacket::new(&mut vec[..]).unwrap();
     echo_packet.set_sequence_number(ping.increment_sequence_number());
     echo_packet.set_identifier(ping.get_identifier());
     echo_packet.set_icmp_type(icmp::IcmpTypes::EchoRequest);
+    echo_packet.set_payload(payload);
 
     let csum = util::checksum(echo_packet.packet(), 1);
     echo_packet.set_checksum(csum);
@@ -133,16 +138,21 @@ fn send_echo(
 fn send_echov6(
     tx: &mut TransportSender,
     ping: &mut Ping,
-    size: usize,
+    payload: &[u8],
 ) -> Result<usize, std::io::Error> {
     // Allocate enough space for a new packet
-    let mut vec: Vec<u8> = vec![0; size];
+    let mut vec: Vec<u8> = vec![
+        0;
+        icmpv6::echo_request::MutableEchoRequestPacket::minimum_packet_size(
+        ) + payload.len()
+    ];
 
     let mut echo_packet =
         icmpv6::echo_request::MutableEchoRequestPacket::new(&mut vec[..]).unwrap();
     echo_packet.set_sequence_number(ping.increment_sequence_number());
     echo_packet.set_identifier(ping.get_identifier());
     echo_packet.set_icmpv6_type(icmpv6::Icmpv6Types::EchoRequest);
+    echo_packet.set_payload(payload);
 
     // Note: ICMPv6 checksum always calculated by the kernel, see RFC 3542
 
