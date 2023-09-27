@@ -254,10 +254,15 @@ impl<T: PingTransport + 'static> Pinger<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+
     use super::*;
 
+    const LOCALHOST: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+    type BoxedError = Box<dyn std::error::Error>;
+
     #[test]
-    fn test_newpinger() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_newpinger() -> Result<(), BoxedError> {
         // test we can create a new pinger with optional arguments,
         // test it returns the new pinger and a client channel
         // test we can use the client channel
@@ -265,13 +270,12 @@ mod tests {
 
         assert_eq!(pinger.max_rtt, Duration::new(3, 0));
 
-        let localhost = [127, 0, 0, 1].into();
-        let res = PingResult::Idle { addr: localhost };
+        let res = PingResult::Idle { addr: LOCALHOST };
 
         pinger.results_sender.send(res)?;
 
         match channel.recv()? {
-            PingResult::Idle { addr } => assert_eq!(addr, localhost),
+            PingResult::Idle { addr } => assert_eq!(addr, LOCALHOST),
             _ => panic!("Unexpected result on channel"),
         }
 
@@ -279,29 +283,42 @@ mod tests {
     }
 
     #[test]
-    fn test_add_remove_addrs() -> Result<(), Box<dyn std::error::Error>> {
-        let (pinger, _) = <Pinger>::new(None)?;
-        pinger.add_ipaddr([127, 0, 0, 1].into());
-        assert_eq!(pinger.targets.lock().unwrap().len(), 1);
-        assert!(pinger
-            .targets
-            .lock()
-            .unwrap()
-            .contains_key(&"127.0.0.1".parse::<IpAddr>().unwrap()));
+    fn test_payload() -> Result<(), BoxedError> {
+        let (mut pinger, channel) = <Pinger>::new(None)?;
+        pinger.payload(b"Hello, world");
+        pinger.add_ipaddr(LOCALHOST);
 
-        pinger.remove_ipaddr([127, 0, 0, 1].into());
-        assert_eq!(pinger.targets.lock().unwrap().len(), 0);
-        assert!(!pinger
-            .targets
-            .lock()
-            .unwrap()
-            .contains_key(&"127.0.0.1".parse::<IpAddr>().unwrap()),);
+        pinger.ping_once();
+
+        match channel.recv()? {
+            PingResult::Receive { addr, .. } => {
+                assert_eq!(addr, LOCALHOST);
+            }
+            _ => panic!("Unexpected result on channel"),
+        }
+
+        // Ideally we should check the responding payload matches, but the response payload is not
+        // plumbed back
 
         Ok(())
     }
 
     #[test]
-    fn test_stop() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_add_remove_addrs() -> Result<(), BoxedError> {
+        let (pinger, _) = <Pinger>::new(None)?;
+        pinger.add_ipaddr(LOCALHOST);
+        assert_eq!(pinger.targets.lock().unwrap().len(), 1);
+        assert!(pinger.targets.lock().unwrap().contains_key(&LOCALHOST));
+
+        pinger.remove_ipaddr([127, 0, 0, 1].into());
+        assert_eq!(pinger.targets.lock().unwrap().len(), 0);
+        assert!(!pinger.targets.lock().unwrap().contains_key(&LOCALHOST));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_stop() -> Result<(), BoxedError> {
         let (pinger, _) = <Pinger>::new(None)?;
         assert!(!*pinger.stop.lock().unwrap());
         pinger.stop_pinger();
@@ -310,7 +327,7 @@ mod tests {
     }
 
     #[test]
-    fn test_integration() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_integration() -> Result<(), BoxedError> {
         // more comprehensive integration test
         let (pinger, channel) = <Pinger>::new(None)?;
         let test_addrs = ["127.0.0.1", "7.7.7.7", "::1"];
