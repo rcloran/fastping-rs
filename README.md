@@ -61,7 +61,7 @@ fn main() {
 
 ```
 
-Note a Pinger is initialized with two arguments: the maximum round trip time before an address is considered "idle" (2 seconds by default) and the size of the ping data packet (16 bytes by default).
+Note a Pinger is initialized with two arguments: the maximum round trip time before an address is considered "idle" (2 seconds by default) and the size of the ping data packet (0 bytes by default).
 To explicitly set these values Pinger would be initialized like so:
 ```rust
 Pinger::new(Some(Duration::from_millis(3000)), Some(24 as usize))
