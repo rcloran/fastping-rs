@@ -9,7 +9,7 @@ use fastping_rs::PingResult::{Idle, Receive};
 use fastping_rs::Pinger;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    pretty_env_logger::init();
+    pretty_env_logger::try_init_timed()?;
     let (pinger, results) = match <Pinger>::new(None) {
         Ok((pinger, results)) => (pinger, results),
         Err(e) => panic!("Error creating pinger: {}", e),
