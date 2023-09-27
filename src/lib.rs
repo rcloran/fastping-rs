@@ -40,9 +40,12 @@ pub enum PingResult {
 /// [`Pinger`]s create [`PingTransport`]s  to send and receive ICMP echo requests and replies.
 /// Results are provided to the client on the channel returned by [`Pinger::new`].
 pub struct Pinger<T: PingTransport = transport::pnet::PingTransport> {
-    // Number of milliseconds of an idle timeout. Once it passed,
-    // the library calls an idle callback function.  Default is 2000
+    // The time from sending a ping until an idle timeout. Once it is passed,
+    // a [`PingResult::Idle`] is sent on the result channel.  Default is 2s.
     max_rtt: Duration,
+
+    // The amount of time between sending pings to every host
+    interval: Duration,
 
     // map of addresses to ping on each run
     targets: Arc<Mutex<BTreeMap<IpAddr, (Ping, bool)>>>,
@@ -65,7 +68,8 @@ pub struct Pinger<T: PingTransport = transport::pnet::PingTransport> {
 impl<T: PingTransport + 'static> Pinger<T> {
     /// Create a [`Pinger`], and the associated [`PingTransport`].
     ///
-    /// `max_rtt` specifies the maximum round-trip-time allowed before a host times out
+    /// `max_rtt` specifies the maximum round-trip-time allowed before an idle timeout. Once it is
+    /// passed, a [`PingResult::Idle`] is sent on the result channel. Default is 2s.
     pub fn new(max_rtt: Option<Duration>) -> Result<(Self, Receiver<PingResult>), Error> {
         let (results_sender, receiver) = channel();
         let (transport_sender, transport_receiver) = channel();
@@ -74,6 +78,7 @@ impl<T: PingTransport + 'static> Pinger<T> {
 
         let pinger = Pinger {
             max_rtt: max_rtt.unwrap_or(Duration::from_millis(2000)),
+            interval: max_rtt.unwrap_or(Duration::from_millis(2000)),
             targets: Arc::new(Mutex::new(BTreeMap::new())),
             payload: vec![],
             transport_receiver,
@@ -88,6 +93,22 @@ impl<T: PingTransport + 'static> Pinger<T> {
     pub fn payload(&mut self, payload: &[u8]) -> &mut Self {
         self.payload = payload.to_vec();
         self
+    }
+
+    /// Set the interval between pings
+    ///
+    /// If the interval is shorter than the max_rtt of this Pinger, an [`Error::DurationTooShort`]
+    /// will be returned.
+    pub fn interval(&mut self, interval: Duration) -> Result<&mut Self, Error> {
+        match interval < self.max_rtt {
+            true => Err(Error::DurationTooShort {
+                minimum: self.max_rtt,
+            }),
+            false => {
+                self.interval = interval;
+                Ok(self)
+            }
+        }
     }
 
     /// Add a new target for pinging
@@ -322,6 +343,20 @@ mod tests {
     }
 
     #[test]
+    fn test_interval() -> Result<(), BoxedError> {
+        let d = Duration::from_millis(1000);
+        let (mut pinger, _) = <Pinger>::new(Some(d))?;
+        assert!(matches!(
+            pinger.interval(Duration::ZERO),
+            Err(Error::DurationTooShort { .. })
+        ));
+
+        pinger.interval(Duration::from_secs(2))?.interval(d)?;
+        assert_eq!(pinger.interval, d);
+        Ok(())
+    }
+
+    #[test]
     fn test_add_remove_addrs() -> Result<(), BoxedError> {
         let (pinger, _) = <Pinger>::new(None)?;
         pinger.add_ipaddr(LOCALHOST);
@@ -360,6 +395,12 @@ mod tests {
         for target in test_addrs {
             pinger.add_ipaddr(target.parse()?);
         }
+
+        let interval = pinger.max_rtt;
+        pinger.payload(&[]).interval(interval)?;
+        // Or you can spell it like this!
+        pinger.interval(interval)?.payload(&[]);
+
         pinger.ping_once();
 
         for _ in test_addrs {
