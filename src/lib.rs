@@ -100,21 +100,27 @@ impl<T: PingTransport + 'static> Pinger<T> {
         remove_ipaddr(&self.targets, addr)
     }
 
-    /// Ping each target address once and stop
+    /// Ping each target address once
+    ///
+    /// Returns as soon as all replies are received, or after max_rtt times out.
+    ///
+    /// When this returns, all [`PingResult`] (`Received` or `Idle`) for the current addresses will
+    /// have been sent on the results channel.
     pub fn ping_once(&mut self) {
         let timer = Instant::now();
-        self.transport.send_pings(
-            self.targets
-                .lock()
-                .unwrap()
-                .values_mut()
-                .map(|(ping, seen)| {
+        let sent;
+        {
+            let mut targets = self.targets.lock().unwrap();
+            sent = targets.len();
+            self.transport.send_pings(
+                targets.values_mut().map(|(ping, seen)| {
                     *seen = false;
                     ping
                 }),
-            &self.payload,
-        );
-        self.await_replies(timer);
+                &self.payload,
+            );
+        }
+        self.await_replies(timer, sent);
     }
 
     /// Run the pinger continuously
@@ -126,11 +132,17 @@ impl<T: PingTransport + 'static> Pinger<T> {
         let stop_inner = stop.clone();
         let targets = self.targets.clone();
         let join_handle = thread::spawn(move || loop {
+            let start = Instant::now();
+            // Work
             self.ping_once();
+
             // check if we've received the stop signal
             if stop_inner.load(Ordering::Relaxed) {
                 return self;
             }
+
+            // If we received all replies faster than the interval, wait
+            thread::sleep(self.max_rtt.saturating_sub(start.elapsed()));
         });
 
         RunningPinger {
@@ -140,7 +152,8 @@ impl<T: PingTransport + 'static> Pinger<T> {
         }
     }
 
-    fn await_replies(&self, timer: Instant) {
+    fn await_replies(&self, timer: Instant, sent: usize) {
+        let mut received = 0;
         loop {
             // use recv_timeout so we don't cause a CPU to needlessly spin
             match self
@@ -160,6 +173,7 @@ impl<T: PingTransport + 'static> Pinger<T> {
                         if ping.get_identifier() == identifier
                             && ping.get_sequence_number() == sequence_number
                         {
+                            received += 1;
                             *seen = true;
                             // Send the ping result over the client channel
                             if let Err(e) =
@@ -179,6 +193,9 @@ impl<T: PingTransport + 'static> Pinger<T> {
                                 identifier
                             );
                         }
+                    }
+                    if received >= sent {
+                        return;
                     }
                 }
                 Err(_) => {
