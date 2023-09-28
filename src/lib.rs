@@ -16,7 +16,7 @@ extern crate log;
 pub mod error;
 pub mod transport;
 
-use crate::error::*;
+use crate::error::Error;
 use crate::transport::{Ping, PingTransport, ReceivedPing};
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -148,11 +148,14 @@ impl<T: PingTransport + 'static> Pinger<T> {
     ///
     /// This consumes the [`Pinger`] object and returns a new [`RunningPinger`]. The original
     /// [`Pinger`] may be obtained from [`RunningPinger::stop`].
-    pub fn run(mut self) -> RunningPinger<T> {
+    ///
+    /// An [`Err`] variant is returned if a thread can not be created for the [`Pinger`].
+    pub fn run(mut self) -> Result<RunningPinger<T>, Error> {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_inner = stop.clone();
         let targets = self.targets.clone();
-        let join_handle = thread::spawn(move || loop {
+        let builder = thread::Builder::new().name("pinger".into());
+        let join_handle = builder.spawn(move || loop {
             let start = Instant::now();
             // Work
             self.ping_once();
@@ -164,13 +167,13 @@ impl<T: PingTransport + 'static> Pinger<T> {
 
             // If we received all replies faster than the interval, wait
             thread::sleep(self.max_rtt.saturating_sub(start.elapsed()));
-        });
+        })?;
 
-        RunningPinger {
+        Ok(RunningPinger {
             stop,
             join_handle,
             targets,
-        }
+        })
     }
 
     fn await_replies(&self, timer: Instant, sent: usize) {
@@ -377,7 +380,7 @@ mod tests {
         let targets_len = pinger.targets.lock().unwrap().len();
         // Copy attributes of the original Pinger
         let max_rtt = pinger.max_rtt;
-        let stop_handle = pinger.run();
+        let stop_handle = pinger.run()?;
         let pinger = stop_handle.stop().unwrap();
         // Try to verify we have the same Pinger back. Other attributes can't be cloned.
         assert_eq!(max_rtt, pinger.max_rtt);
