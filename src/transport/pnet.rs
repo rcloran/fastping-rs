@@ -70,7 +70,7 @@ impl crate::transport::PingTransport for PingTransport {
             timer: Arc::new(RwLock::new(Instant::now())),
         };
 
-        start_listener(rx, rxv6, resp_sender, transport.timer.clone());
+        start_listener(rx, rxv6, resp_sender, transport.timer.clone())?;
         Ok(transport)
     }
 
@@ -163,18 +163,21 @@ fn start_listener(
     rxv6: TransportReceiver,
     resp_sender: Sender<ReceivedPing>,
     timer: Arc<RwLock<Instant>>,
-) {
+) -> Result<(), Error> {
     // start icmp listeners in the background and use internal channels for results
-    start_listener_v4(rxv4, resp_sender.clone(), timer.clone());
-    start_listener_v6(rxv6, resp_sender.clone(), timer.clone());
+    start_listener_v4(rxv4, resp_sender.clone(), timer.clone())?;
+    start_listener_v6(rxv6, resp_sender.clone(), timer.clone())?;
+
+    Ok(())
 }
 
 fn start_listener_v4(
     mut receiver: TransportReceiver,
     resp_sender: Sender<ReceivedPing>,
     timer: Arc<RwLock<Instant>>,
-) {
-    thread::spawn(move || {
+) -> Result<(), Error> {
+    let builder = thread::Builder::new().name("pnet-v4-listener".into());
+    builder.spawn(move || {
         let mut iter = icmp_packet_iter(&mut receiver);
         loop {
             match iter.next() {
@@ -206,15 +209,18 @@ fn start_listener_v4(
                 }
             }
         }
-    });
+    })?;
+
+    Ok(())
 }
 
 fn start_listener_v6(
     mut receiver: TransportReceiver,
     resp_sender: Sender<ReceivedPing>,
     timer: Arc<RwLock<Instant>>,
-) {
-    thread::spawn(move || {
+) -> Result<(), Error> {
+    let builder = thread::Builder::new().name("pnet-v6-listener".into());
+    builder.spawn(move || {
         let mut iter = icmpv6_packet_iter(&mut receiver);
         loop {
             match iter.next() {
@@ -246,5 +252,7 @@ fn start_listener_v6(
                 }
             }
         }
-    });
+    })?;
+
+    Ok(())
 }
