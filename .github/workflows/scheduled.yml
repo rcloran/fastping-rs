@@ -1,0 +1,29 @@
+---
+name: Scheduled jobs
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    # Every Monday at 14:45 UTC
+    - cron: '45 14 * * 1'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  msrv:
+    name: msrv
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust: ["1.63.0"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust }}
+      - run: cargo +${{ matrix.rust }} check --all-targets
